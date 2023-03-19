@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * A V4L2 driver for Sony imx283 cameras.
- * Copyright (C) 2020, Raspberry Pi (Trading) Ltd
  *
- * Based on Sony imx219 camera driver
+ * Based on Sony imx477 camera driver
  * Copyright (C) 2019-2020 Raspberry Pi (Trading) Ltd
  */
 #include <asm/unaligned.h>
@@ -31,25 +30,22 @@
 
 #define IMX283_XCLK_FREQ		24000000
 
-#define IMX283_DEFAULT_LINK_FREQ	450000000
+/* MIPI link speed is fixed at 1.44Gbps for all the modes*/
+#define IMX283_DEFAULT_LINK_FREQ	720000000
 
-/* Pixel rate is fixed at 840MHz for all the modes */
-#define IMX283_PIXEL_RATE		840000000
+/* VMAX internal VBLANK*/
+#define IMX283_REG_VMAX		0x3038
+#define IMX283_VMAX_MAX		0xfffff
 
-/* V_TIMING internal */
-#define IMX283_REG_FRAME_LENGTH		0x0340
-#define IMX283_FRAME_LENGTH_MAX		0xffff
-
-/* H_TIMING internal */
-#define IMX283_REG_LINE_LENGTH		0x0342
-#define IMX283_LINE_LENGTH_MAX		0xffff
+/* HMAX internal HBLANK*/
+#define IMX283_REG_HMAX		0x3036
+#define IMX283_HMAX_MAX		0xffff
 
 /* SHR internal */
 #define IMX283_REG_SHR		0x303B
 #define IMX283_SHR_MIN		11
 
 /* Exposure control */
-#define IMX283_REG_EXPOSURE		0x0202
 #define IMX283_EXPOSURE_MIN			52
 #define IMX283_EXPOSURE_STEP		1
 #define IMX283_EXPOSURE_DEFAULT		1000
@@ -82,12 +78,12 @@ enum pad_types {
 };
 
 /* imx283 native and active pixel array size. */
-#define imx283_NATIVE_WIDTH		5592U
-#define imx283_NATIVE_HEIGHT		3694U
-#define imx283_PIXEL_ARRAY_LEFT		0U
-#define imx283_PIXEL_ARRAY_TOP		0U
-#define imx283_PIXEL_ARRAY_WIDTH	5592U
-#define imx283_PIXEL_ARRAY_HEIGHT	3694U
+#define IMX283_NATIVE_WIDTH		5592U
+#define IMX283_NATIVE_HEIGHT		3694U
+#define imx283_PIXEL_ARRAY_LEFT	108U
+#define imx283_PIXEL_ARRAY_TOP		40U
+#define imx283_PIXEL_ARRAY_WIDTH	5472U
+#define imx283_PIXEL_ARRAY_HEIGHT	3648U
 
 struct imx283_reg {
 	u16 address;
@@ -107,17 +103,23 @@ struct imx283_mode {
 	/* Frame height */
 	unsigned int height;
 
-	/* H-timing in pixels */
-	unsigned int line_length_pix;
+	/* minimum H-timing */
+	uint64_t min_HMAX;
+
+	/* minimum V-timing */
+	uint64_t min_VMAX;
+
+	/* default H-timing */
+	uint64_t default_HMAX;
+
+	/* default V-timing */
+	uint64_t default_VMAX;
+
+	/* minimum SHR */
+	uint64_t min_SHR;
 
 	/* Analog crop rectangle. */
 	struct v4l2_rect crop;
-
-	/* Highest possible framerate. */
-	struct v4l2_fract timeperframe_min;
-
-	/* Default framerate. */
-	struct v4l2_fract timeperframe_default;
 
 	/* Default register values */
 	struct IMX283_reg_list reg_list;
@@ -136,22 +138,19 @@ static const struct imx283_reg mode_common_regs[] = {
     {0x36AA, 0x00},
 
     {0x320B, 0x00},
-        //delay 1ms
-    {0xFFFE, 0x01},
+    {0xFFFE, 0x01}, //delay 1ms
 
-    
     //{0x3105, 0x00},
     {0x3000, 0x00},
-        //delay 19ms
-    {0xFFFE, 0x14},
+    {0xFFFE, 0x14}, //delay 19ms
 
     {0x3001, 0x10},
     {0x3105, 0x00},
     {0x3107, 0xA2},
 };
 
-/* 12 mpix 10fps */
-static const struct imx283_reg mode_4056x3040_regs[] = {
+/* 20MPix 20fps readout mode 0 */
+static const struct imx283_reg mode_5592x3694_regs[] = {
     {0x3004, 0x04}, //MDSEL1
     {0x3005, 0x03}, //MDSEL2
     {0x3006, 0x10}, //MDSEL3
@@ -168,7 +167,7 @@ static const struct imx283_reg mode_4056x3040_regs[] = {
     {0x3012, 0x00}, //VWIDCUT[2:0] = 0
     {0x3013, 0x00}, //MDSEL7 = 0
     {0x3014, 0x00}, //MDSEL7 = 0
-    {0x302F, 0x6E}, //Y_OUT_SIZE = 0E6E    1110 011 X   0 1110
+    {0x302F, 0x6E}, //Y_OUT_SIZE = 0E6E
     {0x3030, 0x0E},  
 
     {0x3031, 0x7E}, //WRITE_VSIZE = 0E7E
@@ -177,50 +176,157 @@ static const struct imx283_reg mode_4056x3040_regs[] = {
     {0x3033, 0x10}, //OB_SIZE_V = 10
 
 
-    {0x3036, 0x84},  //HMAX = 900
-    {0x3037, 0x03},
-
-    {0x3038, 0xA0},  //VMAX = 4000
-    {0x3039, 0x2F}, 
-    {0x303A, 0x00}, 
-    
-
-
-    {0x303B, 0xF0}, //SHR [7:0]
-    {0x303C, 0x0F}, //SHR [15:8]
 
     {0x3058, 0x78}, //HTRIMMING_START = 0x0078 
     {0x3059, 0x00}, 
 
 
-    {0x305A, 0xF0}, // HTRIMMING_END = 0x15F0
+    {0x305A, 0xF0}, //HTRIMMING_END = 0x15F0
     {0x305B, 0x15},
 };
+
+/* 16.84MPix 29.97fps readout mode 1A */
+static const struct imx283_reg mode_5592x3128_regs[] = {
+    {0x3004, 0x04}, //MDSEL1
+    {0x3005, 0x01}, //MDSEL2
+    {0x3006, 0x20}, //MDSEL3
+    {0x3007, 0x50}, //MDSEL4
+
+    {0x3009, 0x00}, //SVR[7:0]    *
+    {0x300A, 0x00}, //SVR[15:8]   *
+    {0x300B, 0x30}, // 1[5] + HTRIMMING_EN[4]=1 + MDVREV[0]=0
+
+    {0x300F, 0x92}, //VWINPOS[7:0] = 0
+    {0x3010, 0x00}, //VWINPOS[3:0] = 0
+
+    {0x3011, 0x23}, //VWIDCUT[7:0] = 0
+    {0x3012, 0x01}, //VWIDCUT[2:0] = 0
+    {0x3013, 0x00}, //MDSEL7 = 0
+    {0x3014, 0x00}, //MDSEL7 = 0
+    {0x302F, 0x28}, //Y_OUT_SIZE = 0x0C28
+    {0x3030, 0x0C},  
+
+    {0x3031, 0x38}, //WRITE_VSIZE = 0x0C38
+    {0x3032, 0x0C},
+
+    {0x3033, 0x10}, //OB_SIZE_V
+
+
+
+    {0x3058, 0x78}, //HTRIMMING_START = 0x0078 
+    {0x3059, 0x00}, 
+
+
+    {0x305A, 0xF0}, //HTRIMMING_END = 0x15F0
+    {0x305B, 0x15},
+};
+
+
+
+
+/* 4.99MPix 50fps readout mode 2 */
+static const struct imx283_reg mode_2796x1846_regs[] = {
+    {0x3004, 0x0D}, //MDSEL1
+    {0x3005, 0x11}, //MDSEL2
+    {0x3006, 0x50}, //MDSEL3
+    {0x3007, 0x00}, //MDSEL4
+
+    {0x3009, 0x00}, //SVR[7:0]    *
+    {0x300A, 0x00}, //SVR[15:8]   *
+    {0x300B, 0x30}, // 1[5] + HTRIMMING_EN[4]=1 + MDVREV[0]=0
+
+    {0x300F, 0x00}, //VWINPOS[7:0] = 0
+    {0x3010, 0x00}, //VWINPOS[3:0] = 0
+
+    {0x3011, 0x00}, //VWIDCUT[7:0] = 0
+    {0x3012, 0x00}, //VWIDCUT[2:0] = 0
+    {0x3013, 0x00}, //MDSEL7 = 0
+    {0x3014, 0x00}, //MDSEL7 = 0
+    {0x302F, 0x32}, //Y_OUT_SIZE = 0x0732
+    {0x3030, 0x07},  
+
+    {0x3031, 0x36}, //WRITE_VSIZE = 0x0736
+    {0x3032, 0x07},
+
+    {0x3033, 0x04}, //OB_SIZE_V = 4
+
+
+
+    {0x3058, 0x78}, //HTRIMMING_START = 0x0078 
+    {0x3059, 0x00}, 
+
+
+    {0x305A, 0xF0}, //HTRIMMING_END = 0x15F0
+    {0x305B, 0x15},
+};
+
+
 
 /* Mode configs */
 static const struct imx283_mode supported_modes_12bit[] = {
 	{
-		/* 12MPix 10fps mode */
+		/* 20MPix 20fps readout mode 0 */
 		.width = 5592,
 		.height = 3694,
-		.line_length_pix = 0x5dc0,
+		.min_HMAX = 900,
+		.min_VMAX = 4000,
+		.default_HMAX = 900,
+		.default_VMAX = 4000,
+		.min_SHR = 11,
 		.crop = {
 			.left = imx283_PIXEL_ARRAY_LEFT,
 			.top = imx283_PIXEL_ARRAY_TOP,
-			.width = 5592,
-			.height = 3694,
-		},
-		.timeperframe_min = {
-			.numerator = 100,
-			.denominator = 1000
-		},
-		.timeperframe_default = {
-			.numerator = 100,
-			.denominator = 1000
+			.width = imx283_PIXEL_ARRAY_WIDTH,
+			.height = imx283_PIXEL_ARRAY_HEIGHT,
 		},
 		.reg_list = {
-			.num_of_regs = ARRAY_SIZE(mode_4056x3040_regs),
-			.regs = mode_4056x3040_regs,
+			.num_of_regs = ARRAY_SIZE(mode_5592x3694_regs),
+			.regs = mode_5592x3694_regs,
+		},
+	},
+
+
+	{
+		/* 4.99MPix 50fps readout mode 2 */
+		.width = 2796,
+		.height = 1846,
+		.min_HMAX = 375,
+		.min_VMAX = 3840,
+		.default_HMAX = 375,
+		.default_VMAX = 3840,
+		.min_SHR = 12,
+		.crop = {
+			.left = 54,
+			.top = 14,
+			.width = 2736,
+			.height = 1824,
+		},
+		.reg_list = {
+			.num_of_regs = ARRAY_SIZE(mode_2796x1846_regs),
+			.regs = mode_2796x1846_regs,
+		},
+	},
+};
+
+static const struct imx283_mode supported_modes_10bit[] = {
+	{
+		/* 16.84MPix 29.97fps readout mode 1A */
+		.width = 5592,
+		.height = 3128,
+		.min_HMAX = 745,
+		.min_VMAX = 3203,
+		.default_HMAX = 750,
+		.default_VMAX = 3203,
+		.min_SHR = 11,
+		.crop = {
+			.left = imx283_PIXEL_ARRAY_LEFT,
+			.top = imx283_PIXEL_ARRAY_TOP,
+			.width = imx283_PIXEL_ARRAY_WIDTH,
+			.height = 3078,
+		},
+		.reg_list = {
+			.num_of_regs = ARRAY_SIZE(mode_5592x3128_regs),
+			.regs = mode_5592x3128_regs,
 		},
 	},
 };
@@ -240,6 +346,11 @@ static const u32 codes[] = {
 	MEDIA_BUS_FMT_SGRBG12_1X12,
 	MEDIA_BUS_FMT_SGBRG12_1X12,
 	MEDIA_BUS_FMT_SBGGR12_1X12,
+	/* 10-bit modes. */
+	MEDIA_BUS_FMT_SRGGB10_1X10,
+	MEDIA_BUS_FMT_SGRBG10_1X10,
+	MEDIA_BUS_FMT_SGBRG10_1X10,
+	MEDIA_BUS_FMT_SBGGR10_1X10,
 };
 
 /* regulator supplies */
@@ -292,6 +403,8 @@ struct imx283 {
 	/* Current mode */
 	const struct imx283_mode *mode;
 
+	uint16_t HMAX;
+	uint32_t VMAX;
 	/*
 	 * Mutex for serialized access:
 	 * Protect sensor module set pad format and start/stop streaming safely.
@@ -325,6 +438,14 @@ static inline void get_mode_table(unsigned int code,
 	case MEDIA_BUS_FMT_SBGGR12_1X12:
 		*mode_list = supported_modes_12bit;
 		*num_modes = ARRAY_SIZE(supported_modes_12bit);
+		break;
+	/* 10-bit */
+	case MEDIA_BUS_FMT_SRGGB10_1X10:
+	case MEDIA_BUS_FMT_SGRBG10_1X10:
+	case MEDIA_BUS_FMT_SGBRG10_1X10:
+	case MEDIA_BUS_FMT_SBGGR10_1X10:
+		*mode_list = supported_modes_10bit;
+		*num_modes = ARRAY_SIZE(supported_modes_10bit);
 		break;
 	default:
 		*mode_list = NULL;
@@ -365,7 +486,7 @@ static int imx283_read_reg(struct imx283 *imx283, u16 reg, u32 len, u32 *val)
 	return 0;
 }
 
-/* Write registers up to 2 at a time */
+/* Write registers 1 byte at a time */
 static int imx283_write_reg_1byte(struct imx283 *imx283, u16 reg, u8 val)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(&imx283->sd);
@@ -379,7 +500,7 @@ static int imx283_write_reg_1byte(struct imx283 *imx283, u16 reg, u8 val)
 	return 0;
 }
 
-/* Write registers up to 2 at a time */
+/* Write registers 2 byte at a time */
 static int imx283_write_reg_2byte(struct imx283 *imx283, u16 reg, u16 val)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(&imx283->sd);
@@ -394,7 +515,23 @@ static int imx283_write_reg_2byte(struct imx283 *imx283, u16 reg, u16 val)
 	return 0;
 }
 
-/* Write a list of registers */
+/* Write registers 3 byte at a time */
+static int imx283_write_reg_3byte(struct imx283 *imx283, u16 reg, u32 val)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(&imx283->sd);
+	u8 buf[5];
+
+	put_unaligned_be16(reg, buf);
+	buf[2]  = val;
+	buf[3]  = val>>8;
+	buf[4]  = val>>16;
+	if (i2c_master_send(client, buf, 5) != 5)
+		return -EIO;
+
+	return 0;
+}
+
+/* Write a list of 1 byte registers */
 static int imx283_write_regs(struct imx283 *imx283,
 			     const struct imx283_reg *regs, u32 len)
 {
@@ -425,11 +562,12 @@ static int imx283_write_regs(struct imx283 *imx283,
 static u32 imx283_get_format_code(struct imx283 *imx283, u32 code)
 {
 	unsigned int i;
-
 	lockdep_assert_held(&imx283->mutex);
+	for (i = 0; i < ARRAY_SIZE(codes); i++)
+		if (codes[i] == code)
+			break;
 
-
-	return codes[0];
+	return codes[i];
 }
 
 static void imx283_set_default_format(struct imx283 *imx283)
@@ -476,12 +614,49 @@ static int imx283_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 }
 
 
-/* TODO */
+static u64 calculate_v4l2_cid_exposure(u64 hmax, u64 vmax, u64 shr, u64 svr, u64 offset) {
+    u64 numerator;
+    numerator = (vmax * (svr + 1) - shr) * hmax + offset;
+
+    do_div(numerator, hmax);
+    numerator = clamp_t(uint32_t, numerator, 0, 0xFFFFFFFF);
+    return numerator;
+}
+
+static void calculate_min_max_v4l2_cid_exposure(u64 hmax, u64 vmax, u64 min_shr, u64 svr, u64 offset, u64 *min_exposure, u64 *max_exposure) {
+    u64 max_shr = (svr + 1) * vmax - 4;
+    max_shr = min_t(uint64_t, max_shr, 0xFFFF);
+
+    *min_exposure = calculate_v4l2_cid_exposure(hmax, vmax, max_shr, svr, offset);
+    *max_exposure = calculate_v4l2_cid_exposure(hmax, vmax, min_shr, svr, offset);
+}
+
+
+/*
+Integration Time [s] = [{VMAX × (SVR + 1) – (SHR)} 
+ × HMAX + offset] / (72 × 10^6) 
+
+Integration Time [s] = exposure * HMAX / (72 × 10^6)
+*/
+
+static uint32_t calculate_shr(uint32_t exposure, uint32_t hmax, uint64_t vmax, uint32_t svr, uint32_t offset) {
+    uint64_t temp;
+    uint32_t shr;
+
+    temp = ((uint64_t)exposure * hmax - offset);
+    do_div(temp, hmax);
+    shr = (uint32_t)(vmax * (svr + 1) - temp);
+
+    return shr;
+}
+
 static int imx283_set_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct imx283 *imx283 =
 		container_of(ctrl->handler, struct imx283, ctrl_handler);
 	struct i2c_client *client = v4l2_get_subdevdata(&imx283->sd);
+	const struct imx283_mode *mode = imx283->mode;
+
 	int ret = 0;
 
 	/*
@@ -489,18 +664,17 @@ static int imx283_set_ctrl(struct v4l2_ctrl *ctrl)
 	 * and adjust if necessary.
 	 */
 	if (ctrl->id == V4L2_CID_VBLANK){
-		int exposure_max, exposure_def, exposure_min;
-
 		/* Honour the VBLANK limits when setting exposure. */
-		exposure_max = ((imx283->vblank->val - 11) * imx283->hblank->val + 209 )/72;
-		exposure_min = (4 * imx283->hblank->val + 209 )/72;
-		exposure_def = min(exposure_max, imx283->exposure->val);
-		exposure_def = max(exposure_min, imx283->exposure->val);
+		u64 current_exposure, max_exposure, min_exposure, vmax;
+		vmax = ((u64)mode->height + ctrl->val) ;
+		imx283 -> VMAX = vmax;
+		
+		calculate_min_max_v4l2_cid_exposure(imx283 -> HMAX, imx283 -> VMAX, (u64)mode->min_SHR, 0, 209, &min_exposure, &max_exposure);
+		current_exposure = clamp_t(uint32_t, current_exposure, min_exposure, max_exposure);
 
-		dev_info(&client->dev,"exposure_max:%d, exposure_min:%d\n",exposure_max, exposure_min);
-		__v4l2_ctrl_modify_range(imx283->exposure, exposure_min,
-					 exposure_max, 1,
-					 exposure_def);
+		dev_info(&client->dev,"exposure_max:%lld, exposure_min:%lld, current_exposure:%lld\n",max_exposure, min_exposure, current_exposure);
+		dev_info(&client->dev,"\tVMAX:%d, HMAX:%d\n",imx283->VMAX, imx283->HMAX);
+		__v4l2_ctrl_modify_range(imx283->exposure, min_exposure,max_exposure, 1,current_exposure);
 	}
 
 	/*
@@ -514,9 +688,11 @@ static int imx283_set_ctrl(struct v4l2_ctrl *ctrl)
 	switch (ctrl->id) {
 	case V4L2_CID_EXPOSURE:
 		{
-		uint16_t shr = imx283->vblank->val - ((ctrl->val * 72 ) - 209 )/imx283->hblank->val;
-		dev_info(&client->dev,"shr:%d <- %d\n",shr, ctrl->val);
-		dev_info(&client->dev,"vblank:%d, hblank%d\n",imx283->vblank->val, imx283->hblank->val);
+		dev_info(&client->dev,"V4L2_CID_EXPOSURE : %d\n",ctrl->val);
+		dev_info(&client->dev,"\tvblank:%d, hblank:%d\n",imx283->vblank->val, imx283->hblank->val);
+		dev_info(&client->dev,"\tVMAX:%d, HMAX:%d\n",imx283->VMAX, imx283->HMAX);
+		u64 shr = calculate_shr(ctrl->val, imx283->HMAX, imx283->VMAX, 0, 209);
+		dev_info(&client->dev,"\tSHR:%lld\n",shr);
 		ret = imx283_write_reg_2byte(imx283, IMX283_REG_SHR, shr);
 		}
 		break;
@@ -525,15 +701,32 @@ static int imx283_set_ctrl(struct v4l2_ctrl *ctrl)
 		ret = imx283_write_reg_2byte(imx283, IMX283_REG_ANALOG_GAIN, ctrl->val);
 		break;
 	case V4L2_CID_VBLANK:
-		ret = imx283_write_reg_2byte(imx283, IMX283_REG_FRAME_LENGTH, ctrl->val);
+		{
+		dev_info(&client->dev,"V4L2_CID_VBLANK : %d\n",ctrl->val);
+		imx283 -> VMAX = ((u64)mode->height + ctrl->val) ;
+		dev_info(&client->dev,"\tVMAX : %d\n",imx283 -> VMAX);
+		ret = imx283_write_reg_3byte(imx283, IMX283_REG_VMAX, imx283 -> VMAX);
+		}
 		break;
 	case V4L2_CID_HBLANK:
-		ret = imx283_write_reg_2byte(imx283, IMX283_REG_LINE_LENGTH, ctrl->val);
+		{
+		dev_info(&client->dev,"V4L2_CID_HBLANK : %d\n",ctrl->val);
+		//int hmax = (IMX283_NATIVE_WIDTH + ctrl->val) * 72000000; / IMX283_PIXEL_RATE;
+		u64 pixel_rate = (u64)mode->width * 72000000;
+		do_div(pixel_rate,mode->min_HMAX);
+		u64 hmax = (u64)(mode->width + ctrl->val) * 72000000;
+		do_div(hmax,pixel_rate);
+		imx283 -> HMAX = hmax;
+		dev_info(&client->dev,"\tHMAX : %d\n",imx283 -> HMAX);
+		ret = imx283_write_reg_2byte(imx283, IMX283_REG_HMAX, hmax);
+		}
 		break;
 	case V4L2_CID_DIGITAL_GAIN:
+		dev_info(&client->dev,"V4L2_CID_DIGITAL_GAIN : %d\n",ctrl->val);
 		ret = imx283_write_reg_1byte(imx283, IMX283_REG_DIGITAL_GAIN, ctrl->val);
 		break;
 	case V4L2_CID_VFLIP:
+		dev_info(&client->dev,"V4L2_CID_VFLIP : %d\n",ctrl->val);
 		ret = imx283_write_reg_1byte(imx283, IMX283_REG_VFLIP, ctrl->val);
 		break;
 	default:
@@ -678,43 +871,47 @@ static int imx283_get_pad_format(struct v4l2_subdev *sd,
 	mutex_unlock(&imx283->mutex);
 	return 0;
 }
-/* TODO */
-static
-unsigned int imx283_get_frame_length(const struct imx283_mode *mode,
-				     const struct v4l2_fract *timeperframe)
-{
-	u64 frame_length;
 
-	frame_length = (u64)timeperframe->numerator * IMX283_PIXEL_RATE;
-	do_div(frame_length,
-	       (u64)timeperframe->denominator * mode->line_length_pix);
-
-	if (WARN_ON(frame_length > IMX283_FRAME_LENGTH_MAX))
-		frame_length = IMX283_FRAME_LENGTH_MAX;
-
-	return max_t(unsigned int, frame_length, mode->height);
-}
 /* TODO */
 static void imx283_set_framing_limits(struct imx283 *imx283)
 {
-	unsigned int frm_length_min, frm_length_default, hblank_min;
+	struct i2c_client *client = v4l2_get_subdevdata(&imx283->sd);
 	const struct imx283_mode *mode = imx283->mode;
+	u64 def_hblank;
+	u64 pixel_rate;
 
-	frm_length_min = imx283_get_frame_length(mode, &mode->timeperframe_min);
-	frm_length_default =
-		     imx283_get_frame_length(mode, &mode->timeperframe_default);
+
+	imx283->VMAX = mode->default_VMAX;
+	imx283->HMAX = mode->default_HMAX;
+
+	pixel_rate = (u64)mode->width * 72000000;
+	do_div(pixel_rate,mode->min_HMAX);
+	dev_info(&client->dev,"Pixel Rate : %lld\n",pixel_rate);
+
+
+	//int def_hblank = mode->default_HMAX * IMX283_PIXEL_RATE / 72000000 - IMX283_NATIVE_WIDTH;
+	def_hblank = mode->default_HMAX * pixel_rate;
+	do_div(def_hblank,72000000);
+	def_hblank = def_hblank - mode->width;
+	__v4l2_ctrl_modify_range(imx283->hblank, 0,
+				 IMX283_HMAX_MAX, 1, def_hblank);
+
+
+	__v4l2_ctrl_s_ctrl(imx283->hblank, def_hblank);
+
+
 
 	/* Update limits and set FPS to default */
-	__v4l2_ctrl_modify_range(imx283->vblank, 3793,
-				 (IMX283_FRAME_LENGTH_MAX),
-				 1, 9000);
+	__v4l2_ctrl_modify_range(imx283->vblank, mode->min_VMAX - mode->height,
+				 IMX283_VMAX_MAX - mode->height,
+				 1, mode->default_VMAX - mode->height);
+	__v4l2_ctrl_s_ctrl(imx283->vblank, mode->default_VMAX - mode->height);
 
 	/* Setting this will adjust the exposure limits as well. */
-	__v4l2_ctrl_s_ctrl(imx283->vblank, frm_length_default - mode->height);
 
-	__v4l2_ctrl_modify_range(imx283->hblank, 887,
-				 IMX283_LINE_LENGTH_MAX, 1, 900);
-	__v4l2_ctrl_s_ctrl(imx283->hblank, 900);
+	__v4l2_ctrl_modify_range(imx283->pixel_rate, pixel_rate, pixel_rate, 1, pixel_rate);
+
+	dev_info(&client->dev,"Setting default HBLANK : %lld, VBLANK : %lld with PixelRate: %lld\n",def_hblank,mode->default_VMAX - mode->height, pixel_rate);
 
 }
 /* TODO */
@@ -866,7 +1063,6 @@ static int imx283_set_stream(struct v4l2_subdev *sd, int enable)
 
 	/* vflip and hflip cannot change during streaming */
 	__v4l2_ctrl_grab(imx283->vflip, enable);
-	__v4l2_ctrl_grab(imx283->hflip, enable);
 
 	mutex_unlock(&imx283->mutex);
 
@@ -1015,8 +1211,8 @@ static int imx283_get_selection(struct v4l2_subdev *sd,
 	case V4L2_SEL_TGT_NATIVE_SIZE:
 		sel->r.left = 0;
 		sel->r.top = 0;
-		sel->r.width = imx283_NATIVE_WIDTH;
-		sel->r.height = imx283_NATIVE_HEIGHT;
+		sel->r.width = IMX283_NATIVE_WIDTH;
+		sel->r.height = IMX283_NATIVE_HEIGHT;
 
 		return 0;
 
@@ -1070,7 +1266,6 @@ static int imx283_init_controls(struct imx283 *imx283)
 	struct v4l2_ctrl_handler *ctrl_hdlr;
 	struct i2c_client *client = v4l2_get_subdevdata(&imx283->sd);
 	struct v4l2_fwnode_device_properties props;
-	unsigned int i;
 	int ret;
 
 	ctrl_hdlr = &imx283->ctrl_handler;
@@ -1081,19 +1276,20 @@ static int imx283_init_controls(struct imx283 *imx283)
 	mutex_init(&imx283->mutex);
 	ctrl_hdlr->lock = &imx283->mutex;
 
-	/* By default, PIXEL_RATE is read only */
-	imx283->pixel_rate = v4l2_ctrl_new_std(ctrl_hdlr, &imx283_ctrl_ops,
-					       V4L2_CID_PIXEL_RATE,
-					       IMX283_PIXEL_RATE,
-					       IMX283_PIXEL_RATE, 1,
-					       IMX283_PIXEL_RATE);
+
 
 	/*
 	 * Create the controls here, but mode specific limits are setup
 	 * in the imx283_set_framing_limits() call below.
 	 */
+	/* By default, PIXEL_RATE is read only */
+	imx283->pixel_rate = v4l2_ctrl_new_std(ctrl_hdlr, &imx283_ctrl_ops,
+					       V4L2_CID_PIXEL_RATE,
+					       0xffff,
+					       0xffff, 1,
+					       0xffff);
 	imx283->vblank = v4l2_ctrl_new_std(ctrl_hdlr, &imx283_ctrl_ops,
-					   V4L2_CID_VBLANK, 0, 0xffff, 1, 0);
+					   V4L2_CID_VBLANK, 0, 0xfffff, 1, 0);
 	imx283->hblank = v4l2_ctrl_new_std(ctrl_hdlr, &imx283_ctrl_ops,
 					   V4L2_CID_HBLANK, 0, 0xffff, 1, 0);
 
@@ -1309,6 +1505,6 @@ static struct i2c_driver imx283_i2c_driver = {
 
 module_i2c_driver(imx283_i2c_driver);
 
-MODULE_AUTHOR("Naushir Patuck <naush@raspberrypi.com>");
+MODULE_AUTHOR("Will Whang <will@willwhang.com>");
 MODULE_DESCRIPTION("Sony imx283 sensor driver");
 MODULE_LICENSE("GPL v2");
