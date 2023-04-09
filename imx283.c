@@ -168,7 +168,7 @@ static const struct imx283_reg mode_5592x3694_regs[] = {
     {0x3013, 0x00}, //MDSEL7 = 0
     {0x3014, 0x00}, //MDSEL7 = 0
     {0x302F, 0x6E}, //Y_OUT_SIZE = 0E6E
-    {0x3030, 0x0E},  
+    {0x3030, 0x0E},
 
     {0x3031, 0x7E}, //WRITE_VSIZE = 0E7E
     {0x3032, 0x0E},
@@ -177,8 +177,8 @@ static const struct imx283_reg mode_5592x3694_regs[] = {
 
 
 
-    {0x3058, 0x78}, //HTRIMMING_START = 0x0078 
-    {0x3059, 0x00}, 
+    {0x3058, 0x78}, //HTRIMMING_START = 0x0078
+    {0x3059, 0x00},
 
 
     {0x305A, 0xF0}, //HTRIMMING_END = 0x15F0
@@ -204,7 +204,7 @@ static const struct imx283_reg mode_5592x3128_regs[] = {
     {0x3013, 0x00}, //MDSEL7 = 0
     {0x3014, 0x00}, //MDSEL7 = 0
     {0x302F, 0x28}, //Y_OUT_SIZE = 0x0C28
-    {0x3030, 0x0C},  
+    {0x3030, 0x0C},
 
     {0x3031, 0x38}, //WRITE_VSIZE = 0x0C38
     {0x3032, 0x0C},
@@ -213,8 +213,8 @@ static const struct imx283_reg mode_5592x3128_regs[] = {
 
 
 
-    {0x3058, 0x78}, //HTRIMMING_START = 0x0078 
-    {0x3059, 0x00}, 
+    {0x3058, 0x78}, //HTRIMMING_START = 0x0078
+    {0x3059, 0x00},
 
 
     {0x305A, 0xF0}, //HTRIMMING_END = 0x15F0
@@ -243,7 +243,7 @@ static const struct imx283_reg mode_2796x1846_regs[] = {
     {0x3013, 0x00}, //MDSEL7 = 0
     {0x3014, 0x00}, //MDSEL7 = 0
     {0x302F, 0x32}, //Y_OUT_SIZE = 0x0732
-    {0x3030, 0x07},  
+    {0x3030, 0x07},
 
     {0x3031, 0x36}, //WRITE_VSIZE = 0x0736
     {0x3032, 0x07},
@@ -252,8 +252,8 @@ static const struct imx283_reg mode_2796x1846_regs[] = {
 
 
 
-    {0x3058, 0x78}, //HTRIMMING_START = 0x0078 
-    {0x3059, 0x00}, 
+    {0x3058, 0x78}, //HTRIMMING_START = 0x0078
+    {0x3059, 0x00},
 
 
     {0x305A, 0xF0}, //HTRIMMING_END = 0x15F0
@@ -633,8 +633,8 @@ static void calculate_min_max_v4l2_cid_exposure(u64 hmax, u64 vmax, u64 min_shr,
 
 
 /*
-Integration Time [s] = [{VMAX × (SVR + 1) – (SHR)} 
- × HMAX + offset] / (72 × 10^6) 
+Integration Time [s] = [{VMAX × (SVR + 1) – (SHR)}
+ × HMAX + offset] / (72 × 10^6)
 
 Integration Time [s] = exposure * HMAX / (72 × 10^6)
 */
@@ -1469,7 +1469,7 @@ error_power_off:
 	return ret;
 }
 
-static int imx283_remove(struct i2c_client *client)
+static void imx283_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct imx283 *imx283 = to_imx283(sd);
@@ -1483,7 +1483,6 @@ static int imx283_remove(struct i2c_client *client)
 		imx283_power_off(&client->dev);
 	pm_runtime_set_suspended(&client->dev);
 
-	return 0;
 }
 
 MODULE_DEVICE_TABLE(of, imx283_dt_ids);

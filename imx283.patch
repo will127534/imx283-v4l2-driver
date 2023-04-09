@@ -1,12 +1,12 @@
 diff --git a/arch/arm/boot/dts/overlays/Makefile b/arch/arm/boot/dts/overlays/Makefile
-index bb9f5bf9d..539cd575b 100644
+index 0fab3056a..f77e8cc79 100644
 --- a/arch/arm/boot/dts/overlays/Makefile
 +++ b/arch/arm/boot/dts/overlays/Makefile
 @@ -115,6 +115,7 @@ dtbo-$(CONFIG_ARCH_BCM2835) += \
  	ilitek251x.dtbo \
  	imx219.dtbo \
  	imx258.dtbo \
-+        imx283.dtbo \
++	imx283.dtbo \
  	imx290.dtbo \
  	imx296.dtbo \
  	imx327.dtbo \
@@ -118,11 +118,23 @@ index 000000000..73b1c6951
 +	};
 +
 +};
+diff --git a/arch/arm/configs/bcm2711_defconfig b/arch/arm/configs/bcm2711_defconfig
+index eb11b4f12..8eaf1bce5 100644
+--- a/arch/arm/configs/bcm2711_defconfig
++++ b/arch/arm/configs/bcm2711_defconfig
+@@ -936,6 +936,7 @@ CONFIG_VIDEO_ARDUCAM_64MP=m
+ CONFIG_VIDEO_ARDUCAM_PIVARIETY=m
+ CONFIG_VIDEO_IMX219=m
+ CONFIG_VIDEO_IMX258=m
++CONFIG_VIDEO_IMX283=m
+ CONFIG_VIDEO_IMX290=m
+ CONFIG_VIDEO_IMX296=m
+ CONFIG_VIDEO_IMX519=m
 diff --git a/drivers/media/i2c/Kconfig b/drivers/media/i2c/Kconfig
-index 5e8e94ee1..c62c48279 100644
+index ced6ffae8..faab1f973 100644
 --- a/drivers/media/i2c/Kconfig
 +++ b/drivers/media/i2c/Kconfig
-@@ -825,6 +825,17 @@ config VIDEO_IMX274
+@@ -170,6 +170,14 @@ config VIDEO_IMX274
  	  This is a V4L2 sensor driver for the Sony IMX274
  	  CMOS image sensor.
  
@@ -134,30 +146,27 @@ index 5e8e94ee1..c62c48279 100644
 +          This is a Video4Linux2 sensor driver for the Sony
 +          IMX283 camera.
 +
-+          To compile this driver as a module, choose M here: the
-+          module will be called imx283.
-+
  config VIDEO_IMX290
  	tristate "Sony IMX290 sensor support"
- 	depends on I2C && VIDEO_V4L2
+ 	depends on I2C && VIDEO_DEV
 diff --git a/drivers/media/i2c/Makefile b/drivers/media/i2c/Makefile
-index a6dc5493a..5ad22274b 100644
+index d639abb8e..b13f10b4d 100644
 --- a/drivers/media/i2c/Makefile
 +++ b/drivers/media/i2c/Makefile
-@@ -127,6 +127,7 @@ obj-$(CONFIG_VIDEO_IMX208)	+= imx208.o
- obj-$(CONFIG_VIDEO_IMX214)	+= imx214.o
- obj-$(CONFIG_VIDEO_IMX219)	+= imx219.o
- obj-$(CONFIG_VIDEO_IMX258)	+= imx258.o
-+obj-$(CONFIG_VIDEO_IMX283)      += imx283.o
- obj-$(CONFIG_VIDEO_IMX274)	+= imx274.o
- obj-$(CONFIG_VIDEO_IMX290)	+= imx290.o
- obj-$(CONFIG_VIDEO_IMX296)	+= imx296.o
+@@ -45,6 +45,7 @@ obj-$(CONFIG_VIDEO_IMX214) += imx214.o
+ obj-$(CONFIG_VIDEO_IMX219) += imx219.o
+ obj-$(CONFIG_VIDEO_IMX258) += imx258.o
+ obj-$(CONFIG_VIDEO_IMX274) += imx274.o
++obj-$(CONFIG_VIDEO_IMX290) += imx283.o
+ obj-$(CONFIG_VIDEO_IMX290) += imx290.o
+ obj-$(CONFIG_VIDEO_IMX296) += imx296.o
+ obj-$(CONFIG_VIDEO_IMX319) += imx319.o
 diff --git a/drivers/media/i2c/imx283.c b/drivers/media/i2c/imx283.c
 new file mode 100755
-index 000000000..9b5f469a0
+index 000000000..717254ad4
 --- /dev/null
 +++ b/drivers/media/i2c/imx283.c
-@@ -0,0 +1,1510 @@
+@@ -0,0 +1,1509 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * A V4L2 driver for Sony imx283 cameras.
@@ -328,7 +337,7 @@ index 000000000..9b5f469a0
 +    {0x3013, 0x00}, //MDSEL7 = 0
 +    {0x3014, 0x00}, //MDSEL7 = 0
 +    {0x302F, 0x6E}, //Y_OUT_SIZE = 0E6E
-+    {0x3030, 0x0E},  
++    {0x3030, 0x0E},
 +
 +    {0x3031, 0x7E}, //WRITE_VSIZE = 0E7E
 +    {0x3032, 0x0E},
@@ -337,8 +346,8 @@ index 000000000..9b5f469a0
 +
 +
 +
-+    {0x3058, 0x78}, //HTRIMMING_START = 0x0078 
-+    {0x3059, 0x00}, 
++    {0x3058, 0x78}, //HTRIMMING_START = 0x0078
++    {0x3059, 0x00},
 +
 +
 +    {0x305A, 0xF0}, //HTRIMMING_END = 0x15F0
@@ -364,7 +373,7 @@ index 000000000..9b5f469a0
 +    {0x3013, 0x00}, //MDSEL7 = 0
 +    {0x3014, 0x00}, //MDSEL7 = 0
 +    {0x302F, 0x28}, //Y_OUT_SIZE = 0x0C28
-+    {0x3030, 0x0C},  
++    {0x3030, 0x0C},
 +
 +    {0x3031, 0x38}, //WRITE_VSIZE = 0x0C38
 +    {0x3032, 0x0C},
@@ -373,8 +382,8 @@ index 000000000..9b5f469a0
 +
 +
 +
-+    {0x3058, 0x78}, //HTRIMMING_START = 0x0078 
-+    {0x3059, 0x00}, 
++    {0x3058, 0x78}, //HTRIMMING_START = 0x0078
++    {0x3059, 0x00},
 +
 +
 +    {0x305A, 0xF0}, //HTRIMMING_END = 0x15F0
@@ -403,7 +412,7 @@ index 000000000..9b5f469a0
 +    {0x3013, 0x00}, //MDSEL7 = 0
 +    {0x3014, 0x00}, //MDSEL7 = 0
 +    {0x302F, 0x32}, //Y_OUT_SIZE = 0x0732
-+    {0x3030, 0x07},  
++    {0x3030, 0x07},
 +
 +    {0x3031, 0x36}, //WRITE_VSIZE = 0x0736
 +    {0x3032, 0x07},
@@ -412,8 +421,8 @@ index 000000000..9b5f469a0
 +
 +
 +
-+    {0x3058, 0x78}, //HTRIMMING_START = 0x0078 
-+    {0x3059, 0x00}, 
++    {0x3058, 0x78}, //HTRIMMING_START = 0x0078
++    {0x3059, 0x00},
 +
 +
 +    {0x305A, 0xF0}, //HTRIMMING_END = 0x15F0
@@ -793,8 +802,8 @@ index 000000000..9b5f469a0
 +
 +
 +/*
-+Integration Time [s] = [{VMAX × (SVR + 1) – (SHR)} 
-+ × HMAX + offset] / (72 × 10^6) 
++Integration Time [s] = [{VMAX × (SVR + 1) – (SHR)}
++ × HMAX + offset] / (72 × 10^6)
 +
 +Integration Time [s] = exposure * HMAX / (72 × 10^6)
 +*/
@@ -1629,7 +1638,7 @@ index 000000000..9b5f469a0
 +	return ret;
 +}
 +
-+static int imx283_remove(struct i2c_client *client)
++static void imx283_remove(struct i2c_client *client)
 +{
 +	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 +	struct imx283 *imx283 = to_imx283(sd);
@@ -1643,7 +1652,6 @@ index 000000000..9b5f469a0
 +		imx283_power_off(&client->dev);
 +	pm_runtime_set_suspended(&client->dev);
 +
-+	return 0;
 +}
 +
 +MODULE_DEVICE_TABLE(of, imx283_dt_ids);
