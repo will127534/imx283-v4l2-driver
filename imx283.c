@@ -79,11 +79,11 @@ enum pad_types {
 
 /* imx283 native and active pixel array size. */
 #define IMX283_NATIVE_WIDTH		5592U
-#define IMX283_NATIVE_HEIGHT		3694U
-#define imx283_PIXEL_ARRAY_LEFT	108U
-#define imx283_PIXEL_ARRAY_TOP		40U
-#define imx283_PIXEL_ARRAY_WIDTH	5472U
-#define imx283_PIXEL_ARRAY_HEIGHT	3648U
+#define IMX283_NATIVE_HEIGHT	3710U
+#define IMX283_PIXEL_ARRAY_LEFT	108U
+#define IMX283_PIXEL_ARRAY_TOP		40U
+#define IMX283_PIXEL_ARRAY_WIDTH	5472U
+#define IMX283_PIXEL_ARRAY_HEIGHT	3648U
 
 struct imx283_reg {
 	u16 address;
@@ -266,18 +266,18 @@ static const struct imx283_reg mode_2796x1846_regs[] = {
 static const struct imx283_mode supported_modes_12bit[] = {
 	{
 		/* 20MPix 20fps readout mode 0 */
-		.width = 5592,
-		.height = 3694,
+		.width = 5472,
+		.height = 3648,
 		.min_HMAX = 900,
 		.min_VMAX = 4000,
 		.default_HMAX = 900,
 		.default_VMAX = 4000,
 		.min_SHR = 11,
 		.crop = {
-			.left = imx283_PIXEL_ARRAY_LEFT,
-			.top = imx283_PIXEL_ARRAY_TOP,
-			.width = imx283_PIXEL_ARRAY_WIDTH,
-			.height = imx283_PIXEL_ARRAY_HEIGHT,
+			.left = 0,
+			.top = 0,
+			.width = 5472,
+			.height = 3648,
 		},
 		.reg_list = {
 			.num_of_regs = ARRAY_SIZE(mode_5592x3694_regs),
@@ -296,10 +296,10 @@ static const struct imx283_mode supported_modes_12bit[] = {
 		.default_VMAX = 3840,
 		.min_SHR = 12,
 		.crop = {
-			.left = 54,
-			.top = 14,
-			.width = 2736,
-			.height = 1824,
+			.left = 108,
+			.top = 40,
+			.width = 5472,
+			.height = 3648,
 		},
 		.reg_list = {
 			.num_of_regs = ARRAY_SIZE(mode_2796x1846_regs),
@@ -311,17 +311,17 @@ static const struct imx283_mode supported_modes_12bit[] = {
 static const struct imx283_mode supported_modes_10bit[] = {
 	{
 		/* 16.84MPix 29.97fps readout mode 1A */
-		.width = 5592,
-		.height = 3128,
+		.width = 5472,
+		.height = 3078,
 		.min_HMAX = 745,
 		.min_VMAX = 3203,
 		.default_HMAX = 750,
 		.default_VMAX = 3203,
 		.min_SHR = 11,
 		.crop = {
-			.left = imx283_PIXEL_ARRAY_LEFT,
-			.top = imx283_PIXEL_ARRAY_TOP,
-			.width = imx283_PIXEL_ARRAY_WIDTH,
+			.left = 108,
+			.top = 34,
+			.width = 5472,
 			.height = 3078,
 		},
 		.reg_list = {
@@ -603,10 +603,10 @@ static int imx283_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 
 	/* Initialize try_crop */
 	try_crop = v4l2_subdev_get_try_crop(sd, fh->state, IMAGE_PAD);
-	try_crop->left = imx283_PIXEL_ARRAY_LEFT;
-	try_crop->top = imx283_PIXEL_ARRAY_TOP;
-	try_crop->width = imx283_PIXEL_ARRAY_WIDTH;
-	try_crop->height = imx283_PIXEL_ARRAY_HEIGHT;
+	try_crop->left = IMX283_PIXEL_ARRAY_LEFT;
+	try_crop->top = IMX283_PIXEL_ARRAY_TOP;
+	try_crop->width = IMX283_PIXEL_ARRAY_WIDTH;
+	try_crop->height = IMX283_PIXEL_ARRAY_HEIGHT;
 
 	mutex_unlock(&imx283->mutex);
 
@@ -656,7 +656,7 @@ static int imx283_set_ctrl(struct v4l2_ctrl *ctrl)
 		container_of(ctrl->handler, struct imx283, ctrl_handler);
 	struct i2c_client *client = v4l2_get_subdevdata(&imx283->sd);
 	const struct imx283_mode *mode = imx283->mode;
-
+	u64 shr, pixel_rate, hmax = 0;
 	int ret = 0;
 
 	/*
@@ -691,7 +691,7 @@ static int imx283_set_ctrl(struct v4l2_ctrl *ctrl)
 		dev_info(&client->dev,"V4L2_CID_EXPOSURE : %d\n",ctrl->val);
 		dev_info(&client->dev,"\tvblank:%d, hblank:%d\n",imx283->vblank->val, imx283->hblank->val);
 		dev_info(&client->dev,"\tVMAX:%d, HMAX:%d\n",imx283->VMAX, imx283->HMAX);
-		u64 shr = calculate_shr(ctrl->val, imx283->HMAX, imx283->VMAX, 0, 209);
+		shr = calculate_shr(ctrl->val, imx283->HMAX, imx283->VMAX, 0, 209);
 		dev_info(&client->dev,"\tSHR:%lld\n",shr);
 		ret = imx283_write_reg_2byte(imx283, IMX283_REG_SHR, shr);
 		}
@@ -712,9 +712,9 @@ static int imx283_set_ctrl(struct v4l2_ctrl *ctrl)
 		{
 		dev_info(&client->dev,"V4L2_CID_HBLANK : %d\n",ctrl->val);
 		//int hmax = (IMX283_NATIVE_WIDTH + ctrl->val) * 72000000; / IMX283_PIXEL_RATE;
-		u64 pixel_rate = (u64)mode->width * 72000000;
+		pixel_rate = (u64)mode->width * 72000000;
 		do_div(pixel_rate,mode->min_HMAX);
-		u64 hmax = (u64)(mode->width + ctrl->val) * 72000000;
+		hmax = (u64)(mode->width + ctrl->val) * 72000000;
 		do_div(hmax,pixel_rate);
 		imx283 -> HMAX = hmax;
 		dev_info(&client->dev,"\tHMAX : %d\n",imx283 -> HMAX);
@@ -725,9 +725,11 @@ static int imx283_set_ctrl(struct v4l2_ctrl *ctrl)
 		dev_info(&client->dev,"V4L2_CID_DIGITAL_GAIN : %d\n",ctrl->val);
 		ret = imx283_write_reg_1byte(imx283, IMX283_REG_DIGITAL_GAIN, ctrl->val);
 		break;
+	case V4L2_CID_HFLIP:
 	case V4L2_CID_VFLIP:
-		dev_info(&client->dev,"V4L2_CID_VFLIP : %d\n",ctrl->val);
-		ret = imx283_write_reg_1byte(imx283, IMX283_REG_VFLIP, ctrl->val);
+		dev_info(&client->dev,"V4L2_CID_HFLIP : %d\n",imx283->hflip->val);
+		dev_info(&client->dev,"V4L2_CID_VFLIP : %d\n",imx283->vflip->val);
+		ret = imx283_write_reg_1byte(imx283, IMX283_REG_VFLIP, imx283->vflip->val);
 		break;
 	default:
 		dev_info(&client->dev,
@@ -1063,6 +1065,7 @@ static int imx283_set_stream(struct v4l2_subdev *sd, int enable)
 
 	/* vflip and hflip cannot change during streaming */
 	__v4l2_ctrl_grab(imx283->vflip, enable);
+	__v4l2_ctrl_grab(imx283->hflip, enable);
 
 	mutex_unlock(&imx283->mutex);
 
@@ -1218,10 +1221,10 @@ static int imx283_get_selection(struct v4l2_subdev *sd,
 
 	case V4L2_SEL_TGT_CROP_DEFAULT:
 	case V4L2_SEL_TGT_CROP_BOUNDS:
-		sel->r.left = imx283_PIXEL_ARRAY_LEFT;
-		sel->r.top = imx283_PIXEL_ARRAY_TOP;
-		sel->r.width = imx283_PIXEL_ARRAY_WIDTH;
-		sel->r.height = imx283_PIXEL_ARRAY_HEIGHT;
+		sel->r.left = IMX283_PIXEL_ARRAY_LEFT;
+		sel->r.top = IMX283_PIXEL_ARRAY_TOP;
+		sel->r.width = IMX283_PIXEL_ARRAY_WIDTH;
+		sel->r.height = IMX283_PIXEL_ARRAY_HEIGHT;
 
 		return 0;
 	}
@@ -1307,6 +1310,11 @@ static int imx283_init_controls(struct imx283 *imx283)
 	v4l2_ctrl_new_std(ctrl_hdlr, &imx283_ctrl_ops, V4L2_CID_DIGITAL_GAIN,
 			  IMX283_DGTL_GAIN_MIN, IMX283_DGTL_GAIN_MAX,
 			  IMX283_DGTL_GAIN_STEP, IMX283_DGTL_GAIN_DEFAULT);
+
+	imx283->hflip = v4l2_ctrl_new_std(ctrl_hdlr, &imx283_ctrl_ops,
+					  V4L2_CID_HFLIP, 0, 1, 1, 0);
+	if (imx283->hflip)
+		imx283->hflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
 
 	imx283->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &imx283_ctrl_ops,
 					  V4L2_CID_VFLIP, 0, 1, 1, 0);
@@ -1469,7 +1477,7 @@ error_power_off:
 	return ret;
 }
 
-static void imx283_remove(struct i2c_client *client)
+static int imx283_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct imx283 *imx283 = to_imx283(sd);
@@ -1482,6 +1490,8 @@ static void imx283_remove(struct i2c_client *client)
 	if (!pm_runtime_status_suspended(&client->dev))
 		imx283_power_off(&client->dev);
 	pm_runtime_set_suspended(&client->dev);
+
+	return 0;
 
 }
 
