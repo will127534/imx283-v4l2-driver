@@ -1,0 +1,5 @@
+#!/bin/sh
+
+dtc -Wno-interrupts_property -@ -I dts -O dtb -o imx283.dtbo imx283-overlay.dts
+
+install -m 751 imx283.dtbo /boot/overlays/
