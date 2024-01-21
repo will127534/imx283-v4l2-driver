@@ -62,7 +62,7 @@
 						clock-noncontinuous;
 						remote-endpoint = <&csi_ep>;
 						link-frequencies =
-							/bits/ 64 <450000000>;
+							/bits/ 64 <720000000>;
 					};
 				};
 
@@ -92,5 +92,12 @@
 		rotation = <&cam_node>,"rotation:0";
 		orientation = <&cam_node>,"orientation:0";
 		media-controller = <&csi>,"brcm,media-controller?";
+		always-on = <0>, "+99";
+		cam0 = <&i2c_frag>, "target:0=",<&i2c_csi_dsi0>,
+			   <&csi_frag>, "target:0=",<&csi0>,
+			   <&clk_frag>, "target:0=",<&cam0_clk>,
+			   <&reg_frag>, "target:0=",<&cam0_reg>,
+			   <&cam_node>, "clocks:0=",<&cam0_clk>,
+			   <&cam_node>, "vana-supply:0=",<&cam0_reg>;
 	};
 };
