@@ -8,11 +8,10 @@ KDIR ?= /lib/modules/$(shell uname -r)/build
 
 #always-y := $(dtbo-y)
 
-all:
-	make -C $(KDIR) M=$(shell pwd) modules
+all: modules
 
-clean:
-	make -C $(KDIR)  M=$(shell pwd) clean
+modules clean:
+	make -C $(KDIR) M=$(shell pwd) $@
 
 %.dtbo: %.dts
 	dtc -@ -I dts -O dtb -o $@ $<
