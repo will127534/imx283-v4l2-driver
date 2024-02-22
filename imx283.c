@@ -2,9 +2,15 @@
 /*
  * V4L2 Support for the IMX283
  *
- * The IMX283 has BigEndian register addresses
- * and uses little-endian value.
+ * Diagonal 15.86 mm (Type 1) CMOS Image Sensor with Square Pixel for Color
+ * Cameras.
  *
+ * Copyright (C) 2024 Ideas on Board Oy.
+ *
+ * Based on Sony IMX283 driver prepared by Will Whang
+ *
+ * Based on Sony imx477 camera driver
+ * Copyright (C) 2019-2020 Raspberry Pi (Trading) Ltd
  */
 
 #include <asm/unaligned.h>
@@ -16,51 +22,61 @@
 #include <linux/of_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
+#include <media/v4l2-cci.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-fwnode.h>
 #include <media/v4l2-mediabus.h>
 
+#include <linux/version.h>
 
-struct cci_reg_sequence {
-	u32 reg;
-	u64 val;
-};
+/* Backport for v4l2_link_freq_to_bitmap */
+int v4l2_link_freq_to_bitmap(struct device *dev, const u64 *fw_link_freqs,
+			     unsigned int num_of_fw_link_freqs,
+			     const s64 *driver_link_freqs,
+			     unsigned int num_of_driver_link_freqs,
+			     unsigned long *bitmap)
+{
+	unsigned int i;
 
-#define CCI_REG_ADDR_MASK		GENMASK(15, 0)
-#define CCI_REG_WIDTH_SHIFT		16
-#define CCI_REG_WIDTH_MASK		GENMASK(19, 16)
-#define CCI_REG_LE                     BIT(20)
+	*bitmap = 0;
 
+	if (!num_of_fw_link_freqs) {
+		dev_err(dev, "no link frequencies in firmware\n");
+		return -ENODATA;
+	}
 
-#define CCI_REG8(x)			((1 << CCI_REG_WIDTH_SHIFT) | (x))
-#define CCI_REG16(x)			((2 << CCI_REG_WIDTH_SHIFT) | (x))
-#define CCI_REG24(x)			((3 << CCI_REG_WIDTH_SHIFT) | (x))
-#define CCI_REG32(x)			((4 << CCI_REG_WIDTH_SHIFT) | (x))
-#define CCI_REG64(x)			((8 << CCI_REG_WIDTH_SHIFT) | (x))
-#define CCI_REG16_LE(x)         (CCI_REG_LE | (2U << CCI_REG_WIDTH_SHIFT) | (x))
-#define CCI_REG24_LE(x)         (CCI_REG_LE | (3U << CCI_REG_WIDTH_SHIFT) | (x))
-#define CCI_REG32_LE(x)         (CCI_REG_LE | (4U << CCI_REG_WIDTH_SHIFT) | (x))
-#define CCI_REG64_LE(x)         (CCI_REG_LE | (8U << CCI_REG_WIDTH_SHIFT) | (x))
+	for (i = 0; i < num_of_fw_link_freqs; i++) {
+		unsigned int j;
 
+		for (j = 0; j < num_of_driver_link_freqs; j++) {
+			if (fw_link_freqs[i] != driver_link_freqs[j])
+				continue;
 
+			dev_dbg(dev, "enabling link frequency %lld Hz\n",
+				driver_link_freqs[j]);
+			*bitmap |= BIT(j);
+			break;
+		}
+	}
 
+	if (!*bitmap) {
+		dev_err(dev, "no matching link frequencies found\n");
 
-/*
- * TODOs
- *  - Move to active state api
- *  - Add 720 MBps speed mode to link_freq
- *    - HMAX/VMAX must be calculated based on link-freq to support this.
- *  - Support arbitrary cropping
- * 
- *  - account for the VOB
- *  - Identify where the HOB is coming from.
- * 
- *  - Remove 'events' that are not used.
- *  - Fix/remove HFLIP/VFLIP which aren't well supported at all.
- *  - Fix exposure and blanking calculations
- */
+		dev_dbg(dev, "specified in firmware:\n");
+		for (i = 0; i < num_of_fw_link_freqs; i++)
+			dev_dbg(dev, "\t%llu Hz\n", fw_link_freqs[i]);
+
+		dev_dbg(dev, "driver supported:\n");
+		for (i = 0; i < num_of_driver_link_freqs; i++)
+			dev_dbg(dev, "\t%lld Hz\n", driver_link_freqs[i]);
+
+		return -ENOENT;
+	}
+
+	return 0;
+}
 
 /* Chip ID */
 #define IMX283_REG_CHIP_ID		CCI_REG8(0x3000)
@@ -83,14 +99,15 @@ struct cci_reg_sequence {
 #define IMX283_REG_MDSEL1		CCI_REG8(0x3004)
 #define IMX283_REG_MDSEL2		CCI_REG8(0x3005)
 #define IMX283_REG_MDSEL3		CCI_REG8(0x3006)
+#define   IMX283_MDSEL3_VCROP_EN	BIT(5)
 #define IMX283_REG_MDSEL4		CCI_REG8(0x3007)
+#define   IMX283_MDSEL4_VCROP_EN	(BIT(4) | BIT(6))
 
 #define IMX283_REG_SVR			CCI_REG16_LE(0x3009)
 
 #define IMX283_REG_HTRIMMING		CCI_REG8(0x300b)
-#define   IMX283_MDVREV			BIT(0) // VFLIP
+#define   IMX283_MDVREV			BIT(0) /* VFLIP */
 #define   IMX283_HTRIMMING_EN		BIT(4)
-#define   IMX283_HTRIMMING_RESERVED	BIT(5)
 
 #define IMX283_REG_VWINPOS		CCI_REG16_LE(0x300f)
 #define IMX283_REG_VWIDCUT		CCI_REG16_LE(0x3011)
@@ -112,7 +129,7 @@ struct cci_reg_sequence {
 #define IMX283_REG_WRITE_VSIZE		CCI_REG16_LE(0x3031)
 #define IMX283_REG_OB_SIZE_V		CCI_REG8(0x3033)
 
-/* HMAX internal HBLANK*/
+/* HMAX internal HBLANK */
 #define IMX283_REG_HMAX			CCI_REG16_LE(0x3036)
 #define IMX283_HMAX_MAX			0xffff
 
@@ -126,7 +143,7 @@ struct cci_reg_sequence {
 
 /*
  * Analog gain control
- *  Gain [dB] = –20log{(2048 – value [10:0]) /2048}
+ *  Gain [dB] = -20log{(2048 - value [10:0]) /2048}
  *  Range: 0dB to approximately +27dB
  */
 #define IMX283_REG_ANALOG_GAIN		CCI_REG16_LE(0x3042)
@@ -188,11 +205,6 @@ struct cci_reg_sequence {
 #define   IMX283_TPG_PAT_H_COLOR_BARS	0x0a
 #define   IMX283_TPG_PAT_V_COLOR_BARS	0x0b
 
-#define MHZ(x)				((x) * 1000 * 1000)
-
-/* MIPI link speed is fixed at 1.44Gbps for all the modes */
-#define IMX283_DEFAULT_LINK_FREQ	MHZ(720)
-
 /* Exposure control */
 #define IMX283_EXPOSURE_MIN		52
 #define IMX283_EXPOSURE_STEP		1
@@ -203,9 +215,13 @@ struct cci_reg_sequence {
 #define IMX283_EMBEDDED_LINE_WIDTH 16384
 #define IMX283_NUM_EMBEDDED_LINES 1
 
+#define MHZ(x)				((x) * 1000 * 1000)
 #define IMAGE_PAD			0
 
-/* imx283 native and active pixel array size. */
+#define imx283_XCLR_MIN_DELAY_US	1000
+#define imx283_XCLR_DELAY_RANGE_US	1000
+
+/* IMX283 native and active pixel array size. */
 static const struct v4l2_rect imx283_native_area = {
 	.top = 0,
 	.left = 0,
@@ -214,8 +230,8 @@ static const struct v4l2_rect imx283_native_area = {
 };
 
 static const struct v4l2_rect imx283_active_area = {
-	.top = 108,
-	.left = 40,
+	.top = 40,
+	.left = 108,
 	.width = 5472,
 	.height = 3648,
 };
@@ -225,7 +241,7 @@ struct IMX283_reg_list {
 	const struct cci_reg_sequence *regs;
 };
 
-/* Mode : resolution and related config&values */
+/* Mode : resolution and related config values */
 struct imx283_mode {
 	unsigned int mode;
 
@@ -238,20 +254,40 @@ struct imx283_mode {
 	/* Frame height */
 	unsigned int height;
 
-	/* minimum H-timing */
-	u64 min_HMAX;
+	/*
+	 * Minimum horizontal timing in pixel-units
+	 *
+	 * Note that HMAX is written in 72MHz units, and the datasheet assumes a
+	 * 720MHz link frequency. Convert datasheet values with the following:
+	 *
+	 * For 12 bpp modes (480Mbps) convert with:
+	 *   hmax = [hmax in 72MHz units] * 480 / 72
+	 *
+	 * For 10 bpp modes (576Mbps) convert with:
+	 *   hmax = [hmax in 72MHz units] * 576 / 72
+	 */
+	u64 min_hmax;
 
-	/* minimum V-timing */
-	u64 min_VMAX;
+	/* minimum V-timing in lines */
+	u64 min_vmax;
 
 	/* default H-timing */
-	u64 default_HMAX;
+	u64 default_hmax;
 
 	/* default V-timing */
-	u64 default_VMAX;
+	u64 default_vmax;
 
 	/* minimum SHR */
-	u64 min_SHR;
+	u64 min_shr;
+
+	/* Abritrary vertical cropping */
+	u32 veff;
+	u32 vst;
+	u32 vct;
+
+	/* Horizontal and vertical binning ratio */
+	u8 hbin_ratio;
+	u8 vbin_ratio;
 
 	/* Optical Blanking */
 	u32 horizontal_ob;
@@ -356,7 +392,6 @@ static const struct imx283_readout_mode imx283_readout_modes[] = {
 
 static const struct cci_reg_sequence mipi_data_rate_1440Mbps[] = {
 	/* The default register settings provide the 1440Mbps rate */
-#if 0
 	{ CCI_REG8(0x36c5), 0x00 }, /* Undocumented */
 	{ CCI_REG8(0x3ac4), 0x00 }, /* Undocumented */
 
@@ -373,12 +408,10 @@ static const struct cci_reg_sequence mipi_data_rate_1440Mbps[] = {
 	{ CCI_REG8(0x3028), 0x47 }, /* THSEXIT */
 	{ CCI_REG8(0x302A), 0x07 }, /* TCKLPRE */
 	{ CCI_REG8(0x3104), 0x02 }, /* SYSMODE */
-
-#endif
 };
 
 static const struct cci_reg_sequence mipi_data_rate_720Mbps[] = {
-	/* Undocumented Arducam Additions "For 720MBps" Setting */
+	/* Undocumented Additions "For 720MBps" Setting */
 	{ CCI_REG8(0x36c5), 0x01 }, /* Undocumented */
 	{ CCI_REG8(0x3ac4), 0x01 }, /* Undocumented */
 
@@ -424,34 +457,75 @@ static const struct IMX283_reg_list link_freq_reglist[] = {
 /* Mode configs */
 static const struct imx283_mode supported_modes_12bit[] = {
 	{
-		/* 20MPix 20fps readout mode 0 */
+		/* 20MPix 21.40 fps readout mode 0 */
 		.mode = IMX283_MODE_0,
 		.bpp = 12,
-		.width = 5472 + 96,
-		.height = 3648 + 16,
-		.min_HMAX = 1500, // Currently padded for testing
-		.min_VMAX = 3793,
-		.default_HMAX = 1500,
-		.default_VMAX = 4000,
-		.min_SHR = 176,
+		.width = 5472,
+		.height = 3648,
+		.min_hmax = 5914, /* 887 @ 480MHz/72MHz */
+		.min_vmax = 3793, /* Lines */
+
+		.veff = 3694,
+		.vst = 0,
+		.vct = 0,
+
+		.hbin_ratio = 1,
+		.vbin_ratio = 1,
+
+		/* 20.00 FPS */
+		.default_hmax = 6000, /* 900 @ 480MHz/72MHz */
+		.default_vmax = 4000,
+
+		.min_shr = 11,
 		.horizontal_ob = 96,
 		.vertical_ob = 16,
+		.crop = CENTERED_RECTANGLE(imx283_active_area, 5472, 3648),
+	},
+	{
+		/*
+		 * Readout mode 2 : 2/2 binned mode (2736x1824)
+		 */
+		.mode = IMX283_MODE_2,
+		.bpp = 12,
+		.width = 2736,
+		.height = 1824,
+		.min_hmax = 1870, /* Pixels (362 * 360/72 + padding) */
+		.min_vmax = 3840, /* Lines */
+
+		/* 50.00 FPS */
+		.default_hmax = 1870, /* 362 @ 360MHz/72MHz */
+		.default_vmax = 3960,
+
+		.veff = 1824,
+		.vst = 0,
+		.vct = 0,
+
+		.hbin_ratio = 2,
+		.vbin_ratio = 2,
+
+		.min_shr = 12,
+		.horizontal_ob = 48,
+		.vertical_ob = 4,
+
 		.crop = CENTERED_RECTANGLE(imx283_active_area, 5472, 3648),
 	},
 };
 
 static const struct imx283_mode supported_modes_10bit[] = {
 	{
-		/* 20MPix 20fps readout mode 1 */
+		/* 20MPix 25.48 fps readout mode 1 */
 		.mode = IMX283_MODE_1,
 		.bpp = 10,
-		.width = 5472 + 96,
-		.height = 3648 + 16,
-		.min_HMAX = 1000, // Currently padded for testing
-		.min_VMAX = 3793,
-		.default_HMAX = 1500,
-		.default_VMAX = 4000,
-		.min_SHR = 11,
+		.width = 5472,
+		.height = 3648,
+		.min_hmax = 5960, /* 745 @ 576MHz / 72MHz */
+		.min_vmax = 3793,
+
+		/* 25.00 FPS */
+		.default_hmax = 1500, /* 750 @ 576MHz / 72MHz */
+		.default_vmax = 3840,
+
+		.min_shr = 10,
 		.horizontal_ob = 96,
 		.vertical_ob = 16,
 		.crop = CENTERED_RECTANGLE(imx283_active_area, 5472, 3648),
@@ -459,55 +533,29 @@ static const struct imx283_mode supported_modes_10bit[] = {
 };
 
 /*
- * The supported formats.
- * This table MUST contain 4 entries per format, to cover the various flip
- * combinations in the order
- * - no flip
- * - h flip
- * - v flip
- * - h&v flips
+ * The supported mbus formats.
  */
 static const u32 codes[] = {
 	/* 12-bit modes. */
 	MEDIA_BUS_FMT_SRGGB12_1X12,
-	MEDIA_BUS_FMT_SGRBG12_1X12,
-	MEDIA_BUS_FMT_SGBRG12_1X12,
-	MEDIA_BUS_FMT_SBGGR12_1X12,
+
 	/* 10-bit modes. */
 	MEDIA_BUS_FMT_SRGGB10_1X10,
-	MEDIA_BUS_FMT_SGRBG10_1X10,
-	MEDIA_BUS_FMT_SGBRG10_1X10,
-	MEDIA_BUS_FMT_SBGGR10_1X10,
 };
 
 /* regulator supplies */
-static const char * const imx283_supply_name[] = {
-	/* Supplies can be enabled in any order */
-	"VANA",  /* Analog (2.8V) supply */
-	"VDIG",  /* Digital Core (1.1V) supply */
-	"VDDL",  /* IF (1.8V) supply */
+static const char *const imx283_supply_name[] = {
+	"VANA", /* Analog (2.9V) supply */
+	"VDIG", /* Supply Voltage 2 (1.8V) supply */
+	"VDDL", /* Supply Voltage 3 (1.2V) supply */
 };
 
-#define imx283_NUM_SUPPLIES ARRAY_SIZE(imx283_supply_name)
-
-/*
- * Initialisation delay between XCLR low->high and the moment when the sensor
- * can start capture (i.e. can leave software standby), given by T7 in the
- * datasheet is 8ms.  This does include I2C setup time as well.
- *
- * Note, that delay between XCLR low->high and reading the CCI ID register (T6
- * in the datasheet) is much smaller - 600us.
- */
-#define imx283_XCLR_MIN_DELAY_US	100000
-#define imx283_XCLR_DELAY_RANGE_US	1000
 
 struct imx283 {
 	struct device *dev;
+	struct regmap *cci;
 
 	const struct imx283_input_frequency *freq;
-
-	/* Selected link_frequency */
-	unsigned int link_freq_idx;
 
 	struct v4l2_subdev sd;
 	struct media_pad pad;
@@ -517,127 +565,27 @@ struct imx283 {
 	struct clk *xclk;
 
 	struct gpio_desc *reset_gpio;
-	struct regulator_bulk_data supplies[imx283_NUM_SUPPLIES];
+	struct regulator_bulk_data supplies[ARRAY_SIZE(imx283_supply_name)];
 
-	struct v4l2_ctrl_handler ctrl_handler;
 	/* V4L2 Controls */
+	struct v4l2_ctrl_handler ctrl_handler;
 	struct v4l2_ctrl *pixel_rate;
 	struct v4l2_ctrl *link_freq;
 	struct v4l2_ctrl *exposure;
-	struct v4l2_ctrl *vflip;
-	struct v4l2_ctrl *hflip;
 	struct v4l2_ctrl *vblank;
 	struct v4l2_ctrl *hblank;
+	struct v4l2_ctrl *vflip;
+
+	struct mutex mutex;
 
 	/* Current mode */
 	const struct imx283_mode *mode;
 
+	unsigned long link_freq_bitmap;
+
 	u16 hmax;
 	u32 vmax;
-
-	/*
-	 * Mutex for serialized access:
-	 * Protect sensor module set pad format and start/stop streaming safely.
-	 */
-	struct mutex mutex;
-
-	/* Streaming on/off */
-	bool streaming;
 };
-
-
-
-int cci_read(struct imx283 *imx283, u32 reg, u64 *val, int *err) {
-    if (err && *err)
-        return *err;
-
-    struct i2c_client *client = v4l2_get_subdevdata(&imx283->sd);
-    u32 reg_addr = reg & CCI_REG_ADDR_MASK;
-    u32 width = (reg & CCI_REG_WIDTH_MASK) >> CCI_REG_WIDTH_SHIFT;
-    u8 addr_buf[2] = { reg_addr >> 8, reg_addr & 0xff };
-    u8 data_buf[8] = { 0 };  // Max 8 bytes for 64-bit data
-    struct i2c_msg msgs[2];
-    int ret;
-
-    if (width == 0 || width > 8) {
-        if (err) *err = -EINVAL;
-        return -EINVAL;
-    }
-
-    // Setup I2C message to write the register address
-    msgs[0].addr = client->addr;
-    msgs[0].flags = 0;
-    msgs[0].len = sizeof(addr_buf);
-    msgs[0].buf = addr_buf;
-
-    // Setup I2C message to read data from the register
-    msgs[1].addr = client->addr;
-    msgs[1].flags = I2C_M_RD;
-    msgs[1].len = width;
-    msgs[1].buf = data_buf;
-
-    ret = i2c_transfer(client->adapter, msgs, 2);
-    if (ret != 2) {
-        if (err) *err = -EIO;
-        return -EIO;
-    }
-
-    // Assuming big-endian register format
-    *val = 0;
-    for (int i = 0; i < width; i++) {
-        *val = (*val << 8) | data_buf[i];
-    }
-
-    return 0;
-}
-
-
-int cci_write(struct imx283 *imx283, u32 reg, u64 val, int *err) {
-
-    struct i2c_client *client = v4l2_get_subdevdata(&imx283->sd);
-    u32 reg_addr = reg & CCI_REG_ADDR_MASK;
-    u32 width = (reg & CCI_REG_WIDTH_MASK) >> CCI_REG_WIDTH_SHIFT;
-    bool is_le = reg & CCI_REG_LE;
-    u8 buf[10]; // Maximum size needed: 2 bytes for address + 8 bytes for data
-    int ret, i;
-
-    // Set the register address (big-endian)
-    buf[0] = (reg_addr >> 8) & 0xff;
-    buf[1] = reg_addr & 0xff;
-
-    // Set the data
-    for (i = 0; i < width; i++) {
-        if (is_le) {
-            // Little-endian: lower address bytes have lower value bytes
-            buf[2 + i] = (val >> (8 * i)) & 0xff;
-        } else {
-            // Big-endian: lower address bytes have higher value bytes
-            buf[2 + width - 1 - i] = (val >> (8 * i)) & 0xff;
-        }
-    }
-
-    ret = i2c_master_send(client, buf, 2 + width);
-    if (ret < 0) {
-        if (err) *err = ret;
-        return ret;
-    }
-
-    return 0;
-}
-
-
-int cci_multi_reg_write(struct imx283 *imx283, const struct cci_reg_sequence *regs, unsigned int num_regs, int *err) {
-
-    for (unsigned int i = 0; i < num_regs; i++) {
-        *err = cci_write(imx283, regs[i].reg, regs[i].val, err);
-        if (*err)
-            return *err;
-    }
-
-    return 0;
-}
-
-
 
 static inline struct imx283 *to_imx283(struct v4l2_subdev *_sd)
 {
@@ -671,86 +619,105 @@ static inline void get_mode_table(unsigned int code,
 	}
 }
 
-/* Get bayer order based on flip setting. */
-static u32 imx283_get_format_code(struct imx283 *imx283, u32 code)
+/* Calculate the Pixel Rate based on the current mode */
+static u64 imx283_pixel_rate(struct imx283 *imx283)
 {
-	unsigned int i;
-	lockdep_assert_held(&imx283->mutex);
-	for (i = 0; i < ARRAY_SIZE(codes); i++)
-		if (codes[i] == code)
-			break;
+	const struct imx283_mode *mode = imx283->mode;
+	unsigned int bpp = mode->bpp;
 
-	return codes[i];
+	const unsigned int ddr = 2; /* Double Data Rate */
+	const unsigned int lanes = 4; /* Only 4 lane support */
+
+	u64 link_frequency = link_frequencies[__ffs(imx283->link_freq_bitmap)];
+	u64 pixel_rate = link_frequency * ddr * lanes / bpp;
+
+	return pixel_rate;
 }
 
-static void imx283_set_default_format(struct imx283 *imx283)
+/* Convert from a variable pixel_rate to 72 MHz clock cycles */
+static u64 imx283_internal_clock(unsigned int pixel_rate, unsigned int pixels)
 {
-	/* Set default mode to max resolution */
-	imx283->mode = &supported_modes_12bit[0];
-	imx283->fmt_code = MEDIA_BUS_FMT_SRGGB12_1X12;
+	/*
+	 * Determine the following operation without overflow:
+	 *    pixels * MHZ(72) / pixel_rate
+	 *
+	 * The internal clock at 72MHz and Pixel Rate (between 240 and 576MHz)
+	 * can easily overflow this calculation, so pre-divide to simplify.
+	 */
+	const u32 iclk_pre = MHZ(72) / 1000000;
+	const u32 pclk_pre = pixel_rate / 1000000;
+
+	return pixels * iclk_pre / pclk_pre;
 }
 
-// Move this to .init_cfg
-static int imx283_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
+/* Internal clock (72MHz) to Pixel Rate clock (Variable) */
+static u64 imx283_iclk_to_pix(unsigned int pixel_rate, unsigned int cycles)
 {
-	struct imx283 *imx283 = to_imx283(sd);
-	struct v4l2_mbus_framefmt *try_fmt_img =
-		v4l2_subdev_get_try_format(sd, fh->state, IMAGE_PAD);
+	/*
+	 * Determine the following operation without overflow:
+	 *    cycles * pixel_rate / MHZ(72)
+	 *
+	 * The internal clock at 72MHz and Pixel Rate (between 240 and 576MHz)
+	 * can easily overflow this calculation, so pre-divide to simplify.
+	 */
+	const u32 iclk_pre = MHZ(72) / 1000000;
+	const u32 pclk_pre = pixel_rate / 1000000;
 
-	struct v4l2_rect *try_crop;
-
-	mutex_lock(&imx283->mutex);
-
-	/* Initialize try_fmt for the image pad */
-	try_fmt_img->width = supported_modes_12bit[0].width;
-	try_fmt_img->height = supported_modes_12bit[0].height;
-	try_fmt_img->code = imx283_get_format_code(imx283,
-						   MEDIA_BUS_FMT_SRGGB12_1X12);
-	try_fmt_img->field = V4L2_FIELD_NONE;
-
-	/* Initialize try_crop */
-	try_crop = v4l2_subdev_get_try_crop(sd, fh->state, IMAGE_PAD);
-	*try_crop = imx283_active_area;
-
-	mutex_unlock(&imx283->mutex);
-
-	return 0;
+	return cycles * pclk_pre / iclk_pre;
 }
 
-static u64 calculate_v4l2_cid_exposure(u64 hmax, u64 vmax, u64 shr, u64 svr, u64 offset) {
-    u64 numerator;
-    numerator = (vmax * (svr + 1) - shr) * hmax + offset;
+/* Determine the exposure based on current hmax, vmax and a given SHR */
+static u64 imx283_exposure(struct imx283 *imx283, u64 shr)
+{
+	u32 svr = 0; /* SVR feature is not currently supported */
+	u32 hmax = imx283->hmax;
+	u64 vmax = imx283->vmax;
+	u32 offset;
+	u64 numerator;
 
-    do_div(numerator, hmax);
-    numerator = clamp_t(uint32_t, numerator, 0, 0xFFFFFFFF);
-    return numerator;
+	/* Number of clocks per internal offset period */
+	offset = imx283->mode->mode == IMX283_MODE_0 ? 209 : 157;
+	numerator = (vmax * (svr + 1) - shr) * hmax + offset;
+
+	do_div(numerator, hmax);
+	numerator = clamp_t(u32, numerator, 0, 0xFFFFFFFF);
+	return numerator;
 }
 
-static void calculate_min_max_v4l2_cid_exposure(u64 hmax, u64 vmax, u64 min_shr, u64 svr, u64 offset, u64 *min_exposure, u64 *max_exposure) {
-    u64 max_shr = (svr + 1) * vmax - 4;
-    max_shr = min_t(uint64_t, max_shr, 0xFFFF);
+static void imx283_exposure_limits(struct imx283 *imx283,
+				   u64 *min_exposure, u64 *max_exposure)
+{
+	u64 vmax = imx283->vmax;
+	u32 svr = 0; /* SVR feature is not currently supported */
+	u64 min_shr = imx283->mode->min_shr;
+	u64 max_shr = (svr + 1) * vmax - 4; /* Global Shutter is not supported */
 
-    *min_exposure = calculate_v4l2_cid_exposure(hmax, vmax, max_shr, svr, offset);
-    *max_exposure = calculate_v4l2_cid_exposure(hmax, vmax, min_shr, svr, offset);
+	max_shr = min_t(u64, max_shr, 0xFFFF);
+
+	*min_exposure = imx283_exposure(imx283, max_shr);
+	*max_exposure = imx283_exposure(imx283, min_shr);
 }
-
 
 /*
-Integration Time [s] = [{VMAX × (SVR + 1) – (SHR)}
- × HMAX + offset] / (72 × 10^6)
+ * Integration Time [s] = [{VMAX x (SVR + 1) – (SHR)} x HMAX + offset]
+ *                      / (72 x 10^6)
+ */
+static u32 imx283_shr(struct imx283 *imx283, u32 exposure)
+{
+	u32 svr = 0; /* SVR feature is not currently supported */
+	u32 hmax = imx283->hmax;
+	u64 vmax = imx283->vmax;
+	u32 shr;
+	u64 temp;
 
-Integration Time [s] = exposure * HMAX / (72 × 10^6)
-*/
+	/* Number of clocks per internal offset period */
+	u32 offset = imx283->mode->mode == IMX283_MODE_0 ? 209 : 157;
 
-static uint32_t calculate_shr(uint32_t exposure, uint32_t hmax, uint64_t vmax, uint32_t svr, uint32_t offset) {
-    uint64_t temp;
-    uint32_t shr;
+	temp = ((u64)exposure * hmax - offset);
+	do_div(temp, hmax);
+	shr = (u32)(vmax * (svr + 1) - temp);
 
-    temp = ((uint64_t)exposure * hmax - offset);
-    do_div(temp, hmax);
-    shr = (uint32_t)(vmax * (svr + 1) - temp);
-
-    return shr;
+	return shr;
 }
 
 static const char * const imx283_tpg_menu[] = {
@@ -781,15 +748,15 @@ static int imx283_update_test_pattern(struct imx283 *imx283, u32 pattern_index)
 		return -EINVAL;
 
 	if (pattern_index) {
-		ret = cci_write(imx283, IMX283_REG_TPG_PAT,
+		ret = cci_write(imx283->cci, IMX283_REG_TPG_PAT,
 				imx283_tpg_val[pattern_index], NULL);
 		if (ret)
 			return ret;
 
-		ret = cci_write(imx283, IMX283_REG_TPG_CTRL,
+		ret = cci_write(imx283->cci, IMX283_REG_TPG_CTRL,
 				IMX283_TPG_CTRL_CLKEN | IMX283_TPG_CTRL_PATEN, NULL);
 	} else {
-		ret = cci_write(imx283, IMX283_REG_TPG_CTRL, 0x00, NULL);
+		ret = cci_write(imx283->cci, IMX283_REG_TPG_CTRL, 0x00, NULL);
 	}
 
 	return ret;
@@ -797,34 +764,30 @@ static int imx283_update_test_pattern(struct imx283 *imx283, u32 pattern_index)
 
 static int imx283_set_ctrl(struct v4l2_ctrl *ctrl)
 {
-	struct imx283 *imx283 =
-		container_of(ctrl->handler, struct imx283, ctrl_handler);
+	struct imx283 *imx283 = container_of(ctrl->handler, struct imx283,
+					     ctrl_handler);
 	const struct imx283_mode *mode = imx283->mode;
-	u64 shr, pixel_rate, hmax = 0;
+	u64 shr, pixel_rate;
 	int ret = 0;
-
-	//state = v4l2_subdev_get_locked_active_state(&imx283->sd);
-	//format = v4l2_subdev_get_pad_format(&imx283->sd, state, 0);
 
 	/*
 	 * The VBLANK control may change the limits of usable exposure, so check
 	 * and adjust if necessary.
 	 */
-	if (ctrl->id == V4L2_CID_VBLANK){
+	if (ctrl->id == V4L2_CID_VBLANK) {
 		/* Honour the VBLANK limits when setting exposure. */
-		u64 current_exposure, max_exposure, min_exposure, vmax;
-		vmax = ((u64)mode->height + ctrl->val) ;
-		imx283->vmax = vmax;
+		u64 current_exposure, max_exposure, min_exposure;
 
-		calculate_min_max_v4l2_cid_exposure(imx283->hmax, imx283->vmax,
-						    (u64)mode->min_SHR, 0, 209,
-						    &min_exposure, &max_exposure);
+		imx283->vmax = mode->height + ctrl->val;
 
-		current_exposure = clamp_t(uint32_t, current_exposure, min_exposure, max_exposure);
+		imx283_exposure_limits(imx283, &min_exposure, &max_exposure);
 
-		dev_info(imx283->dev,"exposure_max:%lld, exposure_min:%lld, current_exposure:%lld\n",max_exposure, min_exposure, current_exposure);
-		dev_info(imx283->dev, "\tVMAX:%d, HMAX:%d\n", imx283->vmax, imx283->hmax);
-		__v4l2_ctrl_modify_range(imx283->exposure, min_exposure,max_exposure, 1,current_exposure);
+		current_exposure = imx283->exposure->val;
+		current_exposure = clamp_t(u32, current_exposure, min_exposure,
+					   max_exposure);
+
+		__v4l2_ctrl_modify_range(imx283->exposure, min_exposure,
+					 max_exposure, 1, current_exposure);
 	}
 
 	/*
@@ -834,58 +797,49 @@ static int imx283_set_ctrl(struct v4l2_ctrl *ctrl)
 	if (pm_runtime_get_if_in_use(imx283->dev) == 0)
 		return 0;
 
-	
 	switch (ctrl->id) {
 	case V4L2_CID_EXPOSURE:
-		{
-		dev_info(imx283->dev,"V4L2_CID_EXPOSURE : %d\n",ctrl->val);
-		dev_info(imx283->dev,"\tvblank:%d, hblank:%d\n",imx283->vblank->val, imx283->hblank->val);
-		dev_info(imx283->dev, "\tVMAX:%d, HMAX:%d\n", imx283->vmax, imx283->hmax);
-		shr = calculate_shr(ctrl->val, imx283->hmax, imx283->vmax, 0, 209);
-		dev_info(imx283->dev,"\tSHR:%lld\n",shr);
-		ret = cci_write(imx283, IMX283_REG_SHR, shr, NULL);
-
-		}
+		shr = imx283_shr(imx283, ctrl->val);
+		dev_dbg(imx283->dev, "V4L2_CID_EXPOSURE : %d - SHR: %lld\n",
+			ctrl->val, shr);
+		ret = cci_write(imx283->cci, IMX283_REG_SHR, shr, NULL);
 		break;
 
 	case V4L2_CID_HBLANK:
-		{
-		dev_info(imx283->dev, "V4L2_CID_HBLANK : %d\n", ctrl->val);
-		//int hmax = (IMX283_NATIVE_WIDTH + ctrl->val) * 72000000; / IMX283_PIXEL_RATE;
-		pixel_rate = (u64)mode->width * 72000000;
-		do_div(pixel_rate, mode->min_HMAX);
-		hmax = (u64)(mode->width + ctrl->val) * 72000000;
-		do_div(hmax, pixel_rate);
-		imx283->hmax = hmax;
-		dev_info(imx283->dev, "\tHMAX : %d\n", imx283->hmax);
-		ret = cci_write(imx283, IMX283_REG_HMAX, hmax, NULL);
-		}
+		pixel_rate = imx283_pixel_rate(imx283);
+		imx283->hmax = imx283_internal_clock(pixel_rate, mode->width + ctrl->val);
+		dev_dbg(imx283->dev, "V4L2_CID_HBLANK : %d  HMAX : %d\n",
+			ctrl->val, imx283->hmax);
+		ret = cci_write(imx283->cci, IMX283_REG_HMAX, imx283->hmax, NULL);
 		break;
 
 	case V4L2_CID_VBLANK:
-		{
-		dev_info(imx283->dev,"V4L2_CID_VBLANK : %d\n",ctrl->val);
-		imx283->vmax = ((u64)mode->height + ctrl->val);
-		dev_info(imx283->dev, "\tVMAX : %d\n", imx283->vmax);
-		ret = cci_write(imx283, IMX283_REG_VMAX, imx283->vmax, NULL);
-		}
+		imx283->vmax = mode->height + ctrl->val;
+		dev_dbg(imx283->dev, "V4L2_CID_VBLANK : %d  VMAX : %d\n",
+			ctrl->val, imx283->vmax);
+		ret = cci_write(imx283->cci, IMX283_REG_VMAX, imx283->vmax, NULL);
 		break;
 
 	case V4L2_CID_ANALOGUE_GAIN:
-		dev_info(imx283->dev, "V4L2_CID_ANALOGUE_GAIN : %d\n", ctrl->val);
-		ret = cci_write(imx283, IMX283_REG_ANALOG_GAIN, ctrl->val, NULL);
+		ret = cci_write(imx283->cci, IMX283_REG_ANALOG_GAIN, ctrl->val, NULL);
 		break;
 
 	case V4L2_CID_DIGITAL_GAIN:
-		dev_info(imx283->dev, "V4L2_CID_DIGITAL_GAIN : %d\n", ctrl->val);
-		ret = cci_write(imx283, IMX283_REG_DIGITAL_GAIN, ctrl->val, NULL);
+		ret = cci_write(imx283->cci, IMX283_REG_DIGITAL_GAIN, ctrl->val, NULL);
 		break;
 
-	case V4L2_CID_HFLIP:
 	case V4L2_CID_VFLIP:
-		//dev_info(imx283->dev,"V4L2_CID_HFLIP : %d\n",imx283->hflip->val);
-		//dev_info(imx283->dev,"V4L2_CID_VFLIP : %d\n",imx283->vflip->val);
-		//ret = imx283_write_reg_1byte(imx283, IMX283_REG_VFLIP, imx283->vflip->val);
+		/*
+		 * VFLIP is managed by BIT(0) of IMX283_REG_HTRIMMING address, hence
+		 * both needed to be set simulatenously.
+		 */
+		if (ctrl->val) {
+			cci_write(imx283->cci, IMX283_REG_HTRIMMING,
+				  IMX283_HTRIMMING_EN | IMX283_MDVREV, &ret);
+		} else {
+			cci_write(imx283->cci, IMX283_REG_HTRIMMING,
+				  IMX283_HTRIMMING_EN, &ret);
+		}
 		break;
 
 	case V4L2_CID_TEST_PATTERN:
@@ -893,10 +847,8 @@ static int imx283_set_ctrl(struct v4l2_ctrl *ctrl)
 		break;
 
 	default:
-		dev_info(imx283->dev,
-			 "ctrl(id:0x%x,val:0x%x) is not handled\n",
-			 ctrl->id, ctrl->val);
-		//ret = -EINVAL;
+		dev_err(imx283->dev, "ctrl(id:0x%x, val:0x%x) is not handled\n",
+			ctrl->id, ctrl->val);
 		break;
 	}
 
@@ -913,12 +865,10 @@ static int imx283_enum_mbus_code(struct v4l2_subdev *sd,
 				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_mbus_code_enum *code)
 {
-	struct imx283 *imx283 = to_imx283(sd);
-
-	if (code->index >= (ARRAY_SIZE(codes) / 4))
+	if (code->index >= (ARRAY_SIZE(codes)))
 		return -EINVAL;
 
-	code->code = imx283_get_format_code(imx283, codes[code->index * 4]);
+	code->code = codes[code->index];
 
 	return 0;
 }
@@ -927,17 +877,12 @@ static int imx283_enum_frame_size(struct v4l2_subdev *sd,
 				  struct v4l2_subdev_state *sd_state,
 				  struct v4l2_subdev_frame_size_enum *fse)
 {
-	struct imx283 *imx283 = to_imx283(sd);
-
 	const struct imx283_mode *mode_list;
 	unsigned int num_modes;
 
 	get_mode_table(fse->code, &mode_list, &num_modes);
 
 	if (fse->index >= num_modes)
-		return -EINVAL;
-
-	if (fse->code != imx283_get_format_code(imx283, fse->code))
 		return -EINVAL;
 
 	fse->min_width = mode_list[fse->index].width;
@@ -952,182 +897,158 @@ static void imx283_reset_colorspace(struct v4l2_mbus_framefmt *fmt)
 {
 	fmt->colorspace = V4L2_COLORSPACE_RAW;
 	fmt->ycbcr_enc = V4L2_MAP_YCBCR_ENC_DEFAULT(fmt->colorspace);
-	fmt->quantization = V4L2_MAP_QUANTIZATION_DEFAULT(true,
-							  fmt->colorspace,
+	fmt->quantization = V4L2_MAP_QUANTIZATION_DEFAULT(true, fmt->colorspace,
 							  fmt->ycbcr_enc);
 	fmt->xfer_func = V4L2_MAP_XFER_FUNC_DEFAULT(fmt->colorspace);
 }
 
 static void imx283_update_image_pad_format(struct imx283 *imx283,
 					   const struct imx283_mode *mode,
-					   struct v4l2_subdev_format *fmt)
+					   struct v4l2_mbus_framefmt *format)
 {
-	fmt->format.width = mode->width;
-	fmt->format.height = mode->height;
-	fmt->format.field = V4L2_FIELD_NONE;
-	imx283_reset_colorspace(&fmt->format);
+	format->width = mode->width;
+	format->height = mode->height;
+	format->field = V4L2_FIELD_NONE;
+	imx283_reset_colorspace(format);
 }
 
-static int imx283_get_pad_format(struct v4l2_subdev *sd,
-				 struct v4l2_subdev_state *sd_state,
-				 struct v4l2_subdev_format *fmt)
+static int imx283_init_state(struct v4l2_subdev *sd,
+			     struct v4l2_subdev_state *state)
 {
 	struct imx283 *imx283 = to_imx283(sd);
+	struct v4l2_mbus_framefmt *format;
+	const struct imx283_mode *mode;
+	struct v4l2_rect *crop;
 
-	mutex_lock(&imx283->mutex);
+	/* Initialize try_fmt */
+	format = v4l2_subdev_state_get_format(state, IMAGE_PAD);
 
-	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
-		struct v4l2_mbus_framefmt *try_fmt =
-			v4l2_subdev_get_try_format(&imx283->sd, sd_state,
-						   fmt->pad);
-		/* update the code which could change due to vflip or hflip: */
-		try_fmt->code = imx283_get_format_code(imx283, try_fmt->code);
-		fmt->format = *try_fmt;
-	} else {
-		imx283_update_image_pad_format(imx283, imx283->mode, fmt);
-		fmt->format.code = imx283_get_format_code(imx283, imx283->fmt_code);
-	}
+	mode = &supported_modes_12bit[0];
+	imx283->mode = mode;
+	format->code = MEDIA_BUS_FMT_SRGGB12_1X12;
+	imx283_update_image_pad_format(imx283, mode, format);
 
-	mutex_unlock(&imx283->mutex);
+	/* Initialize crop rectangle to mode default */
+	crop = v4l2_subdev_state_get_crop(state, IMAGE_PAD);
+	*crop = mode->crop;
+
 	return 0;
 }
 
-/* TODO */
 static void imx283_set_framing_limits(struct imx283 *imx283)
 {
 	const struct imx283_mode *mode = imx283->mode;
-	u64 def_hblank;
-	u64 pixel_rate;
+	u64 pixel_rate = imx283_pixel_rate(imx283);
+	u64 min_hblank, max_hblank, def_hblank;
 
+	/*
+	 * Initialise hmax and vmax for exposure calculations
+	 */
+	imx283->hmax = imx283_internal_clock(pixel_rate, mode->default_hmax);
+	imx283->vmax = mode->default_vmax;
 
-	imx283->vmax = mode->default_VMAX;
-	imx283->hmax = mode->default_HMAX;
-
-	pixel_rate = (u64)mode->width * 72000000;
-	do_div(pixel_rate,mode->min_HMAX);
-	dev_info(imx283->dev,"Pixel Rate : %lld\n",pixel_rate);
-
-
-	//int def_hblank = mode->default_HMAX * IMX283_PIXEL_RATE / 72000000 - IMX283_NATIVE_WIDTH;
-	def_hblank = mode->default_HMAX * pixel_rate;
-	do_div(def_hblank, 72000000);
-	def_hblank = def_hblank - mode->width;
-	__v4l2_ctrl_modify_range(imx283->hblank, 0,
-				 IMX283_HMAX_MAX, 1, def_hblank);
+	/*
+	 * Horizontal Blanking
+	 * Convert the HMAX_MAX (72MHz) to Pixel rate values for HBLANK_MAX
+	 */
+	min_hblank = mode->min_hmax - mode->width;
+	max_hblank = imx283_iclk_to_pix(pixel_rate, IMX283_HMAX_MAX) - mode->width;
+	def_hblank = mode->default_hmax - mode->width;
+	__v4l2_ctrl_modify_range(imx283->hblank, min_hblank, max_hblank, 1,
+				 def_hblank);
 	__v4l2_ctrl_s_ctrl(imx283->hblank, def_hblank);
 
-	/* Update limits and set FPS to default */
-	__v4l2_ctrl_modify_range(imx283->vblank, mode->min_VMAX - mode->height,
-				 IMX283_VMAX_MAX - mode->height,
-				 1, mode->default_VMAX - mode->height);
-	__v4l2_ctrl_s_ctrl(imx283->vblank, mode->default_VMAX - mode->height);
-
-	/* Setting this will adjust the exposure limits as well. */
-
-	__v4l2_ctrl_modify_range(imx283->pixel_rate, pixel_rate, pixel_rate, 1, pixel_rate);
-
-	dev_info(imx283->dev,"Setting default HBLANK : %lld, VBLANK : %lld with PixelRate: %lld\n",def_hblank,mode->default_VMAX - mode->height, pixel_rate);
-
+	/* Vertical Blanking */
+	__v4l2_ctrl_modify_range(imx283->vblank, mode->min_vmax - mode->height,
+				 IMX283_VMAX_MAX - mode->height, 1,
+				 mode->default_vmax - mode->height);
+	__v4l2_ctrl_s_ctrl(imx283->vblank, mode->default_vmax - mode->height);
 }
-/* TODO */
+
 static int imx283_set_pad_format(struct v4l2_subdev *sd,
 				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_format *fmt)
 {
-	struct v4l2_mbus_framefmt *framefmt;
+	struct v4l2_mbus_framefmt *format;
 	const struct imx283_mode *mode;
 	struct imx283 *imx283 = to_imx283(sd);
 	const struct imx283_mode *mode_list;
 	unsigned int num_modes;
 
-	mutex_lock(&imx283->mutex);
-
-	/* Bayer order varies with flips */
-	fmt->format.code = imx283_get_format_code(imx283,
-							fmt->format.code);
-
 	get_mode_table(fmt->format.code, &mode_list, &num_modes);
 
-	mode = v4l2_find_nearest_size(mode_list,
-					num_modes,
-					width, height,
-					fmt->format.width,
-					fmt->format.height);
-	imx283_update_image_pad_format(imx283, mode, fmt);
-	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
-		framefmt = v4l2_subdev_get_try_format(sd, sd_state,
-							fmt->pad);
-		*framefmt = fmt->format;
-	} else if (imx283->mode != mode) {
+	mode = v4l2_find_nearest_size(mode_list, num_modes, width, height,
+				      fmt->format.width, fmt->format.height);
+
+	imx283_update_image_pad_format(imx283, mode, &fmt->format);
+
+	format = v4l2_subdev_state_get_format(sd_state, 0);
+
+	if (imx283->mode == mode && format->code == fmt->format.code)
+		return 0;
+
+	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE) {
 		imx283->mode = mode;
 		imx283->fmt_code = fmt->format.code;
 		imx283_set_framing_limits(imx283);
 	}
 
-	mutex_unlock(&imx283->mutex);
+	*format = fmt->format;
 
 	return 0;
-}
-/* TODO */
-static const struct v4l2_rect *
-__imx283_get_pad_crop(struct imx283 *imx283,
-		      struct v4l2_subdev_state *sd_state,
-		      unsigned int pad, enum v4l2_subdev_format_whence which)
-{
-	switch (which) {
-	case V4L2_SUBDEV_FORMAT_TRY:
-		return v4l2_subdev_get_try_crop(&imx283->sd, sd_state, pad);
-	case V4L2_SUBDEV_FORMAT_ACTIVE:
-		return &imx283->mode->crop;
-	}
-
-	return NULL;
 }
 
 static int imx283_standby_cancel(struct imx283 *imx283)
 {
 	int ret = 0;
+	unsigned int link_freq_idx;
 
-	cci_write(imx283, IMX283_REG_STANDBY,
+	cci_write(imx283->cci, IMX283_REG_STANDBY,
 		  IMX283_STBLOGIC | IMX283_STBDV, &ret);
 
 	/* Configure PLL clocks based on the xclk */
-	cci_multi_reg_write(imx283, imx283->freq->regs,
+	cci_multi_reg_write(imx283->cci, imx283->freq->regs,
 			    imx283->freq->reg_count, &ret);
 
-	dev_err(imx283->dev, "Using clk freq %d MHz", imx283->freq->mhz / MHZ(1));
+	dev_dbg(imx283->dev, "Using clk freq %d MHz", imx283->freq->mhz / MHZ(1));
 
 	/* Initialise communication */
-	cci_write(imx283, IMX283_REG_PLSTMG08, IMX283_PLSTMG08_VAL, &ret);
-	cci_write(imx283, IMX283_REG_PLSTMG02, IMX283_PLSTMG02_VAL, &ret);
+	cci_write(imx283->cci, IMX283_REG_PLSTMG08, IMX283_PLSTMG08_VAL, &ret);
+	cci_write(imx283->cci, IMX283_REG_PLSTMG02, IMX283_PLSTMG02_VAL, &ret);
 
 	/* Enable PLL */
-	cci_write(imx283, IMX283_REG_STBPL, IMX283_STBPL_NORMAL, &ret);
+	cci_write(imx283->cci, IMX283_REG_STBPL, IMX283_STBPL_NORMAL, &ret);
 
 	/* Configure the MIPI link speed */
-	cci_multi_reg_write(imx283,
-			    link_freq_reglist[imx283->link_freq_idx].regs,
-			    link_freq_reglist[imx283->link_freq_idx].num_of_regs,
+	link_freq_idx = __ffs(imx283->link_freq_bitmap);
+	cci_multi_reg_write(imx283->cci,
+			    link_freq_reglist[link_freq_idx].regs,
+			    link_freq_reglist[link_freq_idx].num_of_regs,
 			    &ret);
 
 	usleep_range(1000, 2000); /* 1st Stabilisation period of 1 ms or more */
 
 	/* Activate */
-	cci_write(imx283, IMX283_REG_STANDBY, IMX283_ACTIVE, &ret);
+	cci_write(imx283->cci, IMX283_REG_STANDBY, IMX283_ACTIVE, &ret);
 	usleep_range(19000, 20000); /* 2nd Stabilisation period of 19ms or more */
 
-	cci_write(imx283, IMX283_REG_CLAMP, IMX283_CLPSQRST, &ret);
-	cci_write(imx283, IMX283_REG_XMSTA, 0, &ret);
-	cci_write(imx283, IMX283_REG_SYNCDRV, IMX283_SYNCDRV_XHS_XVS, &ret);
+	cci_write(imx283->cci, IMX283_REG_CLAMP, IMX283_CLPSQRST, &ret);
+	cci_write(imx283->cci, IMX283_REG_XMSTA, 0, &ret);
+	cci_write(imx283->cci, IMX283_REG_SYNCDRV, IMX283_SYNCDRV_XHS_XVS, &ret);
 
 	return ret;
 }
 
 /* Start streaming */
-static int imx283_start_streaming(struct imx283 *imx283)
+static int imx283_start_streaming(struct imx283 *imx283,
+				  struct v4l2_subdev_state *state)
 {
 	const struct imx283_readout_mode *readout;
 	const struct imx283_mode *mode = imx283->mode;
+	u32 v_widcut;
+	s32 v_pos;
+	u32 write_v_size;
+	u32 y_out_size;
 	int ret;
 
 	ret = imx283_standby_cancel(imx283);
@@ -1136,17 +1057,22 @@ static int imx283_start_streaming(struct imx283 *imx283)
 		return ret;
 	}
 
-	/* Set the readout mode registers */
+	/*
+	 * Set the readout mode registers.
+	 * MDSEL3 and MDSEL4 are updated to enable Arbitrary Vertical Cropping.
+	 */
 	readout = &imx283_readout_modes[imx283->mode->mode];
-	cci_write(imx283, IMX283_REG_MDSEL1, readout->mdsel1, &ret);
-	cci_write(imx283, IMX283_REG_MDSEL2, readout->mdsel2, &ret);
-	cci_write(imx283, IMX283_REG_MDSEL3, readout->mdsel3, &ret);
-	cci_write(imx283, IMX283_REG_MDSEL4, readout->mdsel4, &ret);
+	cci_write(imx283->cci, IMX283_REG_MDSEL1, readout->mdsel1, &ret);
+	cci_write(imx283->cci, IMX283_REG_MDSEL2, readout->mdsel2, &ret);
+	cci_write(imx283->cci, IMX283_REG_MDSEL3,
+		  readout->mdsel3 | IMX283_MDSEL3_VCROP_EN, &ret);
+	cci_write(imx283->cci, IMX283_REG_MDSEL4,
+		  readout->mdsel4 | IMX283_MDSEL4_VCROP_EN, &ret);
 
 	/* Mode 1S specific entries from the Readout Drive Mode Tables */
 	if (mode->mode == IMX283_MODE_1S) {
-		cci_write(imx283, IMX283_REG_MDSEL7, 0x01, &ret);
-		cci_write(imx283, IMX283_REG_MDSEL18, 0x1098, &ret);
+		cci_write(imx283->cci, IMX283_REG_MDSEL7, 0x01, &ret);
+		cci_write(imx283->cci, IMX283_REG_MDSEL18, 0x1098, &ret);
 	}
 
 	if (ret) {
@@ -1155,41 +1081,42 @@ static int imx283_start_streaming(struct imx283 *imx283)
 	}
 
 	/* Initialise SVR. Unsupported for now - Always 0 */
-	cci_write(imx283, IMX283_REG_SVR, 0x00, &ret);
+	cci_write(imx283->cci, IMX283_REG_SVR, 0x00, &ret);
 
-	dev_err(imx283->dev, "Mode: Size %d x %d\n", mode->width, mode->height);
-
-	dev_err(imx283->dev, "Analogue Crop (in the mode) %d,%d %dx%d\n",
+	dev_dbg(imx283->dev, "Mode: Size %d x %d\n", mode->width, mode->height);
+	dev_dbg(imx283->dev, "Analogue Crop (in the mode) %d,%d %dx%d\n",
 		mode->crop.left,
 		mode->crop.top,
 		mode->crop.width,
 		mode->crop.height);
 
-	/* Todo: Update for arbitrary vertical cropping */
-	cci_write(imx283, IMX283_REG_Y_OUT_SIZE,
-		  mode->height - mode->vertical_ob, &ret);
-	cci_write(imx283, IMX283_REG_WRITE_VSIZE, mode->height, &ret);
-	cci_write(imx283, IMX283_REG_OB_SIZE_V, mode->vertical_ob, &ret);
+	y_out_size = mode->crop.height / mode->vbin_ratio;
+	write_v_size = y_out_size + mode->vertical_ob;
+	/*
+	 * cropping start position = (VWINPOS – Vst) × 2
+	 * cropping width = Veff – (VWIDCUT – Vct) × 2
+	 */
+	v_pos = imx283->vflip->val ?
+		((-mode->crop.top / mode->vbin_ratio) / 2) + mode->vst :
+		((mode->crop.top / mode->vbin_ratio) / 2)  + mode->vst;
+	v_widcut = ((mode->veff - y_out_size) / 2) + mode->vct;
 
-	/* Configure cropping */
-	cci_write(imx283, IMX283_REG_HTRIMMING,
-		  IMX283_HTRIMMING_EN | IMX283_HTRIMMING_RESERVED, &ret);
+	cci_write(imx283->cci, IMX283_REG_Y_OUT_SIZE, y_out_size, &ret);
+	cci_write(imx283->cci, IMX283_REG_WRITE_VSIZE, write_v_size, &ret);
+	cci_write(imx283->cci, IMX283_REG_VWIDCUT, v_widcut, &ret);
+	cci_write(imx283->cci, IMX283_REG_VWINPOS, v_pos, &ret);
 
-	/* Todo: Validate mode->crop is fully contained within imx283_native_area */
-	/* Todo: Validate with an adjustable crop */
-	cci_write(imx283, IMX283_REG_HTRIMMING_START, mode->crop.left, &ret);
-	cci_write(imx283, IMX283_REG_HTRIMMING_END,
-		  mode->crop.left + mode->crop.width + 1, &ret);
+	cci_write(imx283->cci, IMX283_REG_OB_SIZE_V, mode->vertical_ob, &ret);
 
-	/* Todo: These must be calculated based on the link-freq and mode */
-	cci_write(imx283, IMX283_REG_HMAX, mode->default_HMAX, &ret);
-	cci_write(imx283, IMX283_REG_VMAX, mode->default_VMAX, &ret);
-	cci_write(imx283, IMX283_REG_SHR, mode->min_SHR, &ret);
+	/* TODO: Validate mode->crop is fully contained within imx283_native_area */
+	cci_write(imx283->cci, IMX283_REG_HTRIMMING_START, mode->crop.left, &ret);
+	cci_write(imx283->cci, IMX283_REG_HTRIMMING_END,
+		  mode->crop.left + mode->crop.width, &ret);
 
 	/* Disable embedded data */
-	cci_write(imx283, IMX283_REG_EBD_X_OUT_SIZE, 0, &ret);
+	cci_write(imx283->cci, IMX283_REG_EBD_X_OUT_SIZE, 0, &ret);
 
-	/* Apply customized values from user */
+	/* Apply customized values from controls (HMAX/VMAX/SHR) */
 	ret =  __v4l2_ctrl_handler_setup(imx283->sd.ctrl_handler);
 
 	return ret;
@@ -1200,55 +1127,47 @@ static void imx283_stop_streaming(struct imx283 *imx283)
 {
 	int ret;
 
-	ret = cci_write(imx283, IMX283_REG_STANDBY, IMX283_STBLOGIC, NULL);
+	ret = cci_write(imx283->cci, IMX283_REG_STANDBY, IMX283_STBLOGIC, NULL);
 	if (ret)
 		dev_err(imx283->dev, "%s failed to set stream\n", __func__);
+
+	pm_runtime_put(imx283->dev);
 }
 
 static int imx283_set_stream(struct v4l2_subdev *sd, int enable)
 {
 	struct imx283 *imx283 = to_imx283(sd);
+	struct v4l2_subdev_state *state;
 	int ret = 0;
 
-	mutex_lock(&imx283->mutex);
-	if (imx283->streaming == enable) {
-		mutex_unlock(&imx283->mutex);
-		return 0;
-	}
+	state = v4l2_subdev_lock_and_get_active_state(sd);
 
 	if (enable) {
 		ret = pm_runtime_get_sync(imx283->dev);
 		if (ret < 0) {
 			pm_runtime_put_noidle(imx283->dev);
-			goto err_unlock;
+			goto unlock;
 		}
 
 		/*
 		 * Apply default & customized values
 		 * and then start streaming.
 		 */
-		ret = imx283_start_streaming(imx283);
+		ret = imx283_start_streaming(imx283, state);
 		if (ret)
 			goto err_rpm_put;
 	} else {
 		imx283_stop_streaming(imx283);
-		pm_runtime_put(imx283->dev);
 	}
 
-	imx283->streaming = enable;
-
-	/* vflip and hflip cannot change during streaming */
-	__v4l2_ctrl_grab(imx283->vflip, enable);
-	__v4l2_ctrl_grab(imx283->hflip, enable);
-
-	mutex_unlock(&imx283->mutex);
+	v4l2_subdev_unlock_state(state);
 
 	return ret;
 
 err_rpm_put:
 	pm_runtime_put(imx283->dev);
-err_unlock:
-	mutex_unlock(&imx283->mutex);
+unlock:
+	v4l2_subdev_unlock_state(state);
 
 	return ret;
 }
@@ -1261,7 +1180,7 @@ static int imx283_power_on(struct device *dev)
 	struct imx283 *imx283 = to_imx283(sd);
 	int ret;
 
-	ret = regulator_bulk_enable(imx283_NUM_SUPPLIES,
+	ret = regulator_bulk_enable(ARRAY_SIZE(imx283_supply_name),
 				    imx283->supplies);
 	if (ret) {
 		dev_err(imx283->dev, "%s: failed to enable regulators\n",
@@ -1277,13 +1196,14 @@ static int imx283_power_on(struct device *dev)
 	}
 
 	gpiod_set_value_cansleep(imx283->reset_gpio, 1);
+
 	usleep_range(imx283_XCLR_MIN_DELAY_US,
 		     imx283_XCLR_MIN_DELAY_US + imx283_XCLR_DELAY_RANGE_US);
 
 	return 0;
 
 reg_off:
-	regulator_bulk_disable(imx283_NUM_SUPPLIES, imx283->supplies);
+	regulator_bulk_disable(ARRAY_SIZE(imx283_supply_name), imx283->supplies);
 	return ret;
 }
 
@@ -1294,54 +1214,21 @@ static int imx283_power_off(struct device *dev)
 	struct imx283 *imx283 = to_imx283(sd);
 
 	gpiod_set_value_cansleep(imx283->reset_gpio, 0);
-	regulator_bulk_disable(imx283_NUM_SUPPLIES, imx283->supplies);
+	regulator_bulk_disable(ARRAY_SIZE(imx283_supply_name), imx283->supplies);
 	clk_disable_unprepare(imx283->xclk);
 
 	return 0;
-}
-
-static int __maybe_unused imx283_suspend(struct device *dev)
-{
-	struct i2c_client *client = to_i2c_client(dev);
-	struct v4l2_subdev *sd = i2c_get_clientdata(client);
-	struct imx283 *imx283 = to_imx283(sd);
-
-	if (imx283->streaming)
-		imx283_stop_streaming(imx283);
-
-	return 0;
-}
-
-static int __maybe_unused imx283_resume(struct device *dev)
-{
-	struct i2c_client *client = to_i2c_client(dev);
-	struct v4l2_subdev *sd = i2c_get_clientdata(client);
-	struct imx283 *imx283 = to_imx283(sd);
-	int ret;
-
-	if (imx283->streaming) {
-		ret = imx283_start_streaming(imx283);
-		if (ret)
-			goto error;
-	}
-
-	return 0;
-
-error:
-	imx283_stop_streaming(imx283);
-	imx283->streaming = 0;
-	return ret;
 }
 
 static int imx283_get_regulators(struct imx283 *imx283)
 {
 	unsigned int i;
 
-	for (i = 0; i < imx283_NUM_SUPPLIES; i++)
+	for (i = 0; i < ARRAY_SIZE(imx283_supply_name); i++)
 		imx283->supplies[i].supply = imx283_supply_name[i];
 
 	return devm_regulator_bulk_get(imx283->dev,
-				       imx283_NUM_SUPPLIES,
+				       ARRAY_SIZE(imx283_supply_name),
 				       imx283->supplies);
 }
 
@@ -1351,7 +1238,7 @@ static int imx283_identify_module(struct imx283 *imx283)
 	int ret;
 	u64 val;
 
-	ret = cci_read(imx283, IMX283_REG_CHIP_ID, &val, NULL);
+	ret = cci_read(imx283->cci, IMX283_REG_CHIP_ID, &val, NULL);
 	if (ret) {
 		dev_err(imx283->dev, "failed to read chip id %x, with error %d\n",
 			IMX283_CHIP_ID, ret);
@@ -1364,8 +1251,6 @@ static int imx283_identify_module(struct imx283 *imx283)
 		return -EIO;
 	}
 
-	dev_info(imx283->dev, "Device found\n");
-
 	return 0;
 }
 
@@ -1375,31 +1260,22 @@ static int imx283_get_selection(struct v4l2_subdev *sd,
 {
 	switch (sel->target) {
 	case V4L2_SEL_TGT_CROP: {
-		struct imx283 *imx283 = to_imx283(sd);
-
-		mutex_lock(&imx283->mutex);
-		sel->r = *__imx283_get_pad_crop(imx283, sd_state, sel->pad,
-						sel->which);
-		mutex_unlock(&imx283->mutex);
-
+		sel->r = *v4l2_subdev_state_get_crop(sd_state, 0);
 		return 0;
 	}
 
 	case V4L2_SEL_TGT_NATIVE_SIZE:
 		sel->r = imx283_native_area;
-
 		return 0;
 
 	case V4L2_SEL_TGT_CROP_DEFAULT:
 	case V4L2_SEL_TGT_CROP_BOUNDS:
 		sel->r = imx283_active_area;
-
 		return 0;
 	}
 
 	return -EINVAL;
 }
-
 
 static const struct v4l2_subdev_core_ops imx283_core_ops = {
 	.subscribe_event = v4l2_ctrl_subdev_subscribe_event,
@@ -1412,10 +1288,14 @@ static const struct v4l2_subdev_video_ops imx283_video_ops = {
 
 static const struct v4l2_subdev_pad_ops imx283_pad_ops = {
 	.enum_mbus_code = imx283_enum_mbus_code,
-	.get_fmt = imx283_get_pad_format,
+	.get_fmt = v4l2_subdev_get_fmt,
 	.set_fmt = imx283_set_pad_format,
 	.get_selection = imx283_get_selection,
 	.enum_frame_size = imx283_enum_frame_size,
+};
+
+static const struct v4l2_subdev_internal_ops imx283_internal_ops = {
+	.init_state = imx283_init_state,
 };
 
 static const struct v4l2_subdev_ops imx283_subdev_ops = {
@@ -1424,17 +1304,14 @@ static const struct v4l2_subdev_ops imx283_subdev_ops = {
 	.pad = &imx283_pad_ops,
 };
 
-static const struct v4l2_subdev_internal_ops imx283_internal_ops = {
-	.open = imx283_open,
-};
-
 /* Initialize control handlers */
 static int imx283_init_controls(struct imx283 *imx283)
 {
 	struct v4l2_ctrl_handler *ctrl_hdlr;
-	struct i2c_client *client = v4l2_get_subdevdata(&imx283->sd);
 	struct v4l2_fwnode_device_properties props;
 	const struct imx283_mode *mode = imx283->mode;
+	u64 min_hblank, max_hblank, def_hblank;
+	u64 pixel_rate;
 	int ret;
 
 	ctrl_hdlr = &imx283->ctrl_handler;
@@ -1442,38 +1319,41 @@ static int imx283_init_controls(struct imx283 *imx283)
 	if (ret)
 		return ret;
 
-	mutex_init(&imx283->mutex);
+	/* Serialize controls with sensor device */
 	ctrl_hdlr->lock = &imx283->mutex;
-
 
 	/*
 	 * Create the controls here, but mode specific limits are setup
 	 * in the imx283_set_framing_limits() call below.
 	 */
-	/* By default, PIXEL_RATE is read only */
-	imx283->pixel_rate = v4l2_ctrl_new_std(ctrl_hdlr, &imx283_ctrl_ops,
-					       V4L2_CID_PIXEL_RATE,
-					       0xffff,
-					       0xffff, 1,
-					       0xffff);
 
-	imx283->link_freq = v4l2_ctrl_new_int_menu(ctrl_hdlr,
-						   &imx283_ctrl_ops,
+	/* By default, PIXEL_RATE is read only */
+	pixel_rate = imx283_pixel_rate(imx283);
+	imx283->pixel_rate = v4l2_ctrl_new_std(ctrl_hdlr, &imx283_ctrl_ops,
+					       V4L2_CID_PIXEL_RATE, pixel_rate,
+					       pixel_rate, 1, pixel_rate);
+
+	imx283->link_freq = v4l2_ctrl_new_int_menu(ctrl_hdlr, &imx283_ctrl_ops,
 						   V4L2_CID_LINK_FREQ,
-						   ARRAY_SIZE(link_frequencies) - 1,
-						   0, link_frequencies);
+						   __fls(imx283->link_freq_bitmap),
+						   __ffs(imx283->link_freq_bitmap),
+						   link_frequencies);
 	if (imx283->link_freq)
 		imx283->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
-	/* Initial vblank/hblank/exposure based on the current mode. */
+	/* Initialise vblank/hblank/exposure based on the current mode. */
 	imx283->vblank = v4l2_ctrl_new_std(ctrl_hdlr, &imx283_ctrl_ops,
 					   V4L2_CID_VBLANK,
-					   mode->min_VMAX - mode->height,
+					   mode->min_vmax - mode->height,
 					   IMX283_VMAX_MAX, 1,
-					   mode->default_VMAX - mode->height);
+					   mode->default_vmax - mode->height);
 
+	min_hblank = mode->min_hmax - mode->width;
+	max_hblank = imx283_iclk_to_pix(pixel_rate, IMX283_HMAX_MAX) - mode->width;
+	def_hblank = mode->default_hmax - mode->width;
 	imx283->hblank = v4l2_ctrl_new_std(ctrl_hdlr, &imx283_ctrl_ops,
-					   V4L2_CID_HBLANK, 0, 0xffff, 1, 0);
+					   V4L2_CID_HBLANK, min_hblank, max_hblank,
+					   1, def_hblank);
 
 	imx283->exposure = v4l2_ctrl_new_std(ctrl_hdlr, &imx283_ctrl_ops,
 					     V4L2_CID_EXPOSURE,
@@ -1490,13 +1370,8 @@ static int imx283_init_controls(struct imx283 *imx283)
 			  IMX283_DGTL_GAIN_MIN, IMX283_DGTL_GAIN_MAX,
 			  IMX283_DGTL_GAIN_STEP, IMX283_DGTL_GAIN_DEFAULT);
 
-	imx283->hflip = v4l2_ctrl_new_std(ctrl_hdlr, &imx283_ctrl_ops,
-					  V4L2_CID_HFLIP, 0, 1, 1, 0);
-	if (imx283->hflip)
-		imx283->hflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
-
-	imx283->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &imx283_ctrl_ops,
-					  V4L2_CID_VFLIP, 0, 1, 1, 0);
+	imx283->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &imx283_ctrl_ops, V4L2_CID_VFLIP,
+					  0, 1, 1, 0);
 	if (imx283->vflip)
 		imx283->vflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
 
@@ -1507,12 +1382,12 @@ static int imx283_init_controls(struct imx283 *imx283)
 
 	if (ctrl_hdlr->error) {
 		ret = ctrl_hdlr->error;
-		dev_err(&client->dev, "%s control init failed (%d)\n",
+		dev_err(imx283->dev, "%s control init failed (%d)\n",
 			__func__, ret);
 		goto error;
 	}
 
-	ret = v4l2_fwnode_device_parse(&client->dev, &props);
+	ret = v4l2_fwnode_device_parse(imx283->dev, &props);
 	if (ret)
 		goto error;
 
@@ -1523,14 +1398,22 @@ static int imx283_init_controls(struct imx283 *imx283)
 
 	imx283->sd.ctrl_handler = ctrl_hdlr;
 
+	mutex_lock(&imx283->mutex);
+
+	ret = __v4l2_ctrl_s_ctrl(imx283->link_freq,
+				 __ffs(imx283->link_freq_bitmap));
+	if (ret)
+		goto error;
+
 	/* Setup exposure and frame/line length limits. */
 	imx283_set_framing_limits(imx283);
+
+	mutex_unlock(&imx283->mutex);
 
 	return 0;
 
 error:
 	v4l2_ctrl_handler_free(ctrl_hdlr);
-	mutex_destroy(&imx283->mutex);
 
 	return ret;
 }
@@ -1538,7 +1421,6 @@ error:
 static void imx283_free_controls(struct imx283 *imx283)
 {
 	v4l2_ctrl_handler_free(imx283->sd.ctrl_handler);
-	mutex_destroy(&imx283->mutex);
 }
 
 static const struct of_device_id imx283_dt_ids[] = {
@@ -1554,7 +1436,6 @@ static int imx283_parse_endpoint(struct imx283 *imx283)
 	};
 	struct fwnode_handle *ep;
 	int ret;
-	int i, j;
 
 	if (!fwnode)
 		return -ENXIO;
@@ -1578,26 +1459,10 @@ static int imx283_parse_endpoint(struct imx283 *imx283)
 		goto done_endpoint_free;
 	}
 
-	if (!bus_cfg.nr_of_link_frequencies) {
-		dev_err(imx283->dev, "no link frequencies defined\n");
-		ret = -EINVAL;
-		goto done_endpoint_free;
-	}
-
-	for (i = 0; i < bus_cfg.nr_of_link_frequencies; i++) {
-		for (j = 0; j < ARRAY_SIZE(link_frequencies); j++) {
-			if (bus_cfg.link_frequencies[i] == link_frequencies[j]) {
-				imx283->link_freq_idx = j;
-				break;
-			}
-		}
-
-		if (j == ARRAY_SIZE(link_frequencies)) {
-			ret = dev_err_probe(imx283->dev, -EINVAL,
-					    "no supported link freq found\n");
-			goto done_endpoint_free;
-		}
-	}
+	ret = v4l2_link_freq_to_bitmap(imx283->dev, bus_cfg.link_frequencies,
+				       bus_cfg.nr_of_link_frequencies,
+				       link_frequencies, ARRAY_SIZE(link_frequencies),
+				       &imx283->link_freq_bitmap);
 
 done_endpoint_free:
 	v4l2_fwnode_endpoint_free(&bus_cfg);
@@ -1618,18 +1483,14 @@ static int imx283_probe(struct i2c_client *client)
 
 	imx283->dev = &client->dev;
 
-	struct device *dev = &client->dev;
-
 	v4l2_i2c_subdev_init(&imx283->sd, client, &imx283_subdev_ops);
 
-	/*
-	imx283 = devm_cci_regmap_init_i2c(client, 16);
-	if (IS_ERR(imx283)) {
-		ret = PTR_ERR(imx283);
+	imx283->cci = devm_cci_regmap_init_i2c(client, 16);
+	if (IS_ERR(imx283->cci)) {
+		ret = PTR_ERR(imx283->cci);
 		dev_err(imx283->dev, "failed to initialize CCI: %d\n", ret);
 		return ret;
 	}
-	*/
 
 	/* Get system clock (xclk) */
 	imx283->xclk = devm_clk_get(imx283->dev, NULL);
@@ -1663,14 +1524,16 @@ static int imx283_probe(struct i2c_client *client)
 	}
 
 	/* Request optional enable pin */
-	imx283->reset_gpio = devm_gpiod_get_optional(dev, "reset",
+	imx283->reset_gpio = devm_gpiod_get_optional(imx283->dev, "reset",
 						     GPIOD_OUT_HIGH);
+
+	mutex_init(&imx283->mutex);
 
 	/*
 	 * The sensor must be powered for imx283_identify_module()
 	 * to be able to read the CHIP_ID register
 	 */
-	ret = imx283_power_on(dev);
+	ret = imx283_power_on(imx283->dev);
 	if (ret)
 		return ret;
 
@@ -1678,19 +1541,20 @@ static int imx283_probe(struct i2c_client *client)
 	if (ret)
 		goto error_power_off;
 
-	/* Initialize default format */
-	imx283_set_default_format(imx283);
+	/* Initialize default format and mode to max resolution */
+	imx283->mode = &supported_modes_12bit[0];
+	imx283->fmt_code = MEDIA_BUS_FMT_SRGGB12_1X12;
 
 	/*
 	 * Enable runtime PM with autosuspend. As the device has been powered
 	 * manually, mark it as active, and increase the usage count without
 	 * resuming the device.
 	 */
-	pm_runtime_set_active(dev);
-	pm_runtime_get_noresume(dev);
-	pm_runtime_enable(dev);
-	pm_runtime_set_autosuspend_delay(dev, 1000);
-	pm_runtime_use_autosuspend(dev);
+	pm_runtime_set_active(imx283->dev);
+	pm_runtime_get_noresume(imx283->dev);
+	pm_runtime_enable(imx283->dev);
+	pm_runtime_set_autosuspend_delay(imx283->dev, 1000);
+	pm_runtime_use_autosuspend(imx283->dev);
 
 	/* This needs the pm runtime to be registered. */
 	ret = imx283_init_controls(imx283);
@@ -1698,10 +1562,10 @@ static int imx283_probe(struct i2c_client *client)
 		goto error_pm;
 
 	/* Initialize subdev */
-	imx283->sd.internal_ops = &imx283_internal_ops;
 	imx283->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE |
 			    V4L2_SUBDEV_FL_HAS_EVENTS;
 	imx283->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
+	imx283->sd.internal_ops = &imx283_internal_ops;
 
 	/* Initialize source pads */
 	imx283->pad.flags = MEDIA_PAD_FL_SOURCE;
@@ -1712,13 +1576,23 @@ static int imx283_probe(struct i2c_client *client)
 		goto error_handler_free;
 	}
 
-	ret = v4l2_async_register_subdev_sensor(&imx283->sd);
+	imx283->sd.state_lock = imx283->ctrl_handler.lock;
+	ret = v4l2_subdev_init_finalize(&imx283->sd);
 	if (ret < 0) {
-		dev_err(imx283->dev, "failed to register sensor sub-device: %d\n", ret);
+		dev_err(imx283->dev, "subdev init error: %d\n", ret);
 		goto error_media_entity;
 	}
 
+	ret = v4l2_async_register_subdev_sensor(&imx283->sd);
+	if (ret < 0) {
+		dev_err(imx283->dev, "failed to register sensor sub-device: %d\n", ret);
+		goto error_subdev_cleanup;
+	}
+
 	return 0;
+
+error_subdev_cleanup:
+	v4l2_subdev_cleanup(&imx283->sd);
 
 error_media_entity:
 	media_entity_cleanup(&imx283->sd.entity);
@@ -1741,6 +1615,7 @@ static void imx283_remove(struct i2c_client *client)
 	struct imx283 *imx283 = to_imx283(sd);
 
 	v4l2_async_unregister_subdev(sd);
+	v4l2_subdev_cleanup(&imx283->sd);
 	media_entity_cleanup(&sd->entity);
 	imx283_free_controls(imx283);
 
@@ -1748,13 +1623,11 @@ static void imx283_remove(struct i2c_client *client)
 	if (!pm_runtime_status_suspended(imx283->dev))
 		imx283_power_off(imx283->dev);
 	pm_runtime_set_suspended(imx283->dev);
-
 }
 
 MODULE_DEVICE_TABLE(of, imx283_dt_ids);
 
 static const struct dev_pm_ops imx283_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(imx283_suspend, imx283_resume)
 	SET_RUNTIME_PM_OPS(imx283_power_off, imx283_power_on, NULL)
 };
 
@@ -1764,11 +1637,18 @@ static struct i2c_driver imx283_i2c_driver = {
 		.of_match_table	= imx283_dt_ids,
 		.pm = &imx283_pm_ops,
 	},
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(6,6,0)
 	.probe_new = imx283_probe,
+#else	
+	.probe = imx283_probe,
+#endif
 	.remove = imx283_remove,
 };
 
 module_i2c_driver(imx283_i2c_driver);
 
+MODULE_AUTHOR("Will Whang <will@willwhang.com>");
+MODULE_AUTHOR("Kieran Bingham <kieran.bingham@ideasonboard.com>");
+MODULE_AUTHOR("Umang Jain <umang.jain@ideasonboard.com>");
 MODULE_DESCRIPTION("Sony IMX283 Sensor Driver");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");
