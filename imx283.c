@@ -456,6 +456,21 @@ static const struct imx283_mode supported_modes_10bit[] = {
 		.vertical_ob = 16,
 		.crop = CENTERED_RECTANGLE(imx283_active_area, 5472, 3648),
 	},
+	{
+		/* 20MPix 20fps readout mode 1 */
+		.mode = IMX283_MODE_1A,
+		.bpp = 10,
+		.width = 5472 + 96,
+		.height = 3078 + 16,
+		.min_HMAX = 1000, // Currently padded for testing
+		.min_VMAX = 3793,
+		.default_HMAX = 1500,
+		.default_VMAX = 4000,
+		.min_SHR = 11,
+		.horizontal_ob = 96,
+		.vertical_ob = 16,
+		.crop = CENTERED_RECTANGLE(imx283_active_area, 5472, 3078),
+	},
 };
 
 /*
