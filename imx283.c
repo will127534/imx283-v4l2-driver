@@ -424,49 +424,64 @@ static const struct IMX283_reg_list link_freq_reglist[] = {
 /* Mode configs */
 static const struct imx283_mode supported_modes_12bit[] = {
 	{
-		/* 20MPix 20fps readout mode 0 */
+		/* 5568x3664 21.40fps readout mode 0 */
 		.mode = IMX283_MODE_0,
 		.bpp = 12,
 		.width = 5472 + 96,
 		.height = 3648 + 16,
-		.min_HMAX = 887, // Currently padded for testing
+		.min_HMAX = 887,
 		.min_VMAX = 3793,
 		.default_HMAX = 900,
 		.default_VMAX = 4000,
-		.min_SHR = 176,
+		.min_SHR = 12,
 		.horizontal_ob = 96,
 		.vertical_ob = 16,
+		.crop = CENTERED_RECTANGLE(imx283_active_area, 5472, 3648),
+	},
+	{
+		/* 2784x1828 51.80fps readout mode 2 */
+		.mode = IMX283_MODE_2,
+		.bpp = 12,
+		.width = (5472 + 96)/2,
+		.height = (3648 + 8)/2,
+		.min_HMAX = 362,
+		.min_VMAX = 3840,
+		.default_HMAX = 375,
+		.default_VMAX = 3840,
+		.min_SHR = 12,
+		.horizontal_ob = 96/2,
+		.vertical_ob = 8/2,
 		.crop = CENTERED_RECTANGLE(imx283_active_area, 5472, 3648),
 	},
 };
 
 static const struct imx283_mode supported_modes_10bit[] = {
 	{
-		/* 20MPix 20fps readout mode 1 */
+		/* 5568x3664 25.48fps readout mode 1 */
 		.mode = IMX283_MODE_1,
 		.bpp = 10,
 		.width = 5472 + 96,
 		.height = 3648 + 16,
-		.min_HMAX = 745, // Currently padded for testing
+		.min_HMAX = 745,
 		.min_VMAX = 3793,
 		.default_HMAX = 750,
 		.default_VMAX = 3840,
-		.min_SHR = 11,
+		.min_SHR = 12,
 		.horizontal_ob = 96,
 		.vertical_ob = 16,
 		.crop = CENTERED_RECTANGLE(imx283_active_area, 5472, 3648),
 	},
 	{
-		/* 20MPix 20fps readout mode 1 */
+		/* 5568x3094 30.17fps readout mode 1A */
 		.mode = IMX283_MODE_1A,
 		.bpp = 10,
 		.width = 5472 + 96,
 		.height = 3078 + 16,
-		.min_HMAX = 745, // Currently padded for testing
+		.min_HMAX = 745,
 		.min_VMAX = 3203,
 		.default_HMAX = 750,
 		.default_VMAX = 3840,
-		.min_SHR = 11,
+		.min_SHR = 12,
 		.horizontal_ob = 96,
 		.vertical_ob = 16,
 		.crop = CENTERED_RECTANGLE(imx283_active_area, 5472, 3078),
