@@ -1711,16 +1711,10 @@ static int imx283_probe(struct i2c_client *client)
 	/* Initialize default format */
 	imx283_set_default_format(imx283);
 
-	/*
-	 * Enable runtime PM with autosuspend. As the device has been powered
-	 * manually, mark it as active, and increase the usage count without
-	 * resuming the device.
-	 */
+	/* Enable runtime PM and turn off the device */
 	pm_runtime_set_active(dev);
-	pm_runtime_get_noresume(dev);
 	pm_runtime_enable(dev);
-	pm_runtime_set_autosuspend_delay(dev, 1000);
-	pm_runtime_use_autosuspend(dev);
+	pm_runtime_idle(dev);
 
 	/* This needs the pm runtime to be registered. */
 	ret = imx283_init_controls(imx283);
