@@ -60,7 +60,34 @@ After making these changes, save the file and exit the editor.
 
 Remember to reboot your system for the changes to take effect.
 
+## dtoverlay options
+
+### cam0
+
+If the camera is attached to cam0 port, append the dtoverlay with `,cam0` like this:  
+```
+camera_auto_detect=0
+dtoverlay=imx283,cam0
+```
+
+### always-on
+
+If you want to keep the camera power always on (Useful for debugging HW issues, specifically this will set CAM_GPIO to high constantly), append the dtoverlay with `,always-on` like this:  
+```
+camera_auto_detect=0
+dtoverlay=imx283,always-on
+```
+
+### mix usage
+
+Last note is that all the options can be used at the same time, the dtoverlay will looks like this:
+```
+camera_auto_detect=0
+dtoverlay=imx283,always-on,cam0
+```
 
 ## Special Thanks
 
 Special thanks to Sasha Shturma's Raspberry Pi CM4 Сarrier with Hi-Res MIPI Display project, the install script is adapted from the github project page: https://github.com/renetec-io/cm4-panel-jdi-lt070me05000
+
+
